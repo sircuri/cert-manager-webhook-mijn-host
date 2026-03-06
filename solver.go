@@ -12,7 +12,7 @@ import (
 	"k8s.io/client-go/rest"
 )
 
-const groupName = "acme.vanefferenonline.nl"
+const groupName = "acme.mijn-host.vanefferenonline.nl"
 
 // dnsClient abstracts DNS operations for testability.
 type dnsClient interface {
