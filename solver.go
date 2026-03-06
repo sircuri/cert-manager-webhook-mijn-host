@@ -1,25 +1,84 @@
 package main
 
 import (
+	"context"
+	"fmt"
+	"strings"
+
+	"github.com/arjen/cert-manager-webhook-mijn-host/mijnhost"
 	"github.com/cert-manager/cert-manager/pkg/acme/webhook/apis/acme/v1alpha1"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/rest"
 )
 
-// solver implements the webhook.Solver interface.
-type solver struct{}
+const groupName = "acme.mijn.host"
 
-func (s *solver) Name() string {
+// mijnHostSolver implements the webhook.Solver interface for mijn.host DNS.
+type mijnHostSolver struct {
+	kubeClient kubernetes.Interface
+}
+
+func (s *mijnHostSolver) Name() string {
 	return "mijn-host"
 }
 
-func (s *solver) Present(ch *v1alpha1.ChallengeRequest) error {
+func (s *mijnHostSolver) Initialize(kubeClientConfig *rest.Config, stopCh <-chan struct{}) error {
+	cl, err := kubernetes.NewForConfig(kubeClientConfig)
+	if err != nil {
+		return fmt.Errorf("failed to create kubernetes client: %w", err)
+	}
+	s.kubeClient = cl
 	return nil
 }
 
-func (s *solver) CleanUp(ch *v1alpha1.ChallengeRequest) error {
-	return nil
+func (s *mijnHostSolver) Present(ch *v1alpha1.ChallengeRequest) error {
+	cfg, err := loadConfig(ch.Config)
+	if err != nil {
+		return fmt.Errorf("present: %w", err)
+	}
+
+	apiKey, err := getAPIKey(s.kubeClient, ch.ResourceNamespace, cfg.APIKeySecretRef)
+	if err != nil {
+		return fmt.Errorf("present: %w", err)
+	}
+
+	zone := strings.TrimSuffix(ch.ResolvedZone, ".")
+	fqdn := strings.TrimSuffix(ch.ResolvedFQDN, ".")
+
+	client := mijnhost.NewClient(apiKey)
+	return client.AddTXTRecord(context.Background(), zone, fqdn, ch.Key, cfg.TTL)
 }
 
-func (s *solver) Initialize(kubeClientConfig *rest.Config, stopCh <-chan struct{}) error {
-	return nil
+func (s *mijnHostSolver) CleanUp(ch *v1alpha1.ChallengeRequest) error {
+	cfg, err := loadConfig(ch.Config)
+	if err != nil {
+		return fmt.Errorf("cleanup: %w", err)
+	}
+
+	apiKey, err := getAPIKey(s.kubeClient, ch.ResourceNamespace, cfg.APIKeySecretRef)
+	if err != nil {
+		return fmt.Errorf("cleanup: %w", err)
+	}
+
+	zone := strings.TrimSuffix(ch.ResolvedZone, ".")
+	fqdn := strings.TrimSuffix(ch.ResolvedFQDN, ".")
+
+	client := mijnhost.NewClient(apiKey)
+	return client.RemoveTXTRecord(context.Background(), zone, fqdn, ch.Key)
+}
+
+// getAPIKey reads the API key from a Kubernetes Secret.
+func getAPIKey(client kubernetes.Interface, namespace string, ref SecretRef) (string, error) {
+	secret, err := client.CoreV1().Secrets(namespace).Get(context.Background(), ref.Name, metav1.GetOptions{})
+	if err != nil {
+		return "", fmt.Errorf("failed to get secret %s/%s: %w", namespace, ref.Name, err)
+	}
+
+	data, ok := secret.Data[ref.Key]
+	if !ok {
+		return "", fmt.Errorf("secret %s/%s has no key %q", namespace, ref.Name, ref.Key)
+	}
+
+	return string(data), nil
 }
