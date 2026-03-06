@@ -1,4 +1,4 @@
-module github.com/arjen/cert-manager-webhook-mijn-host
+module github.com/sircuri/cert-manager-webhook-mijn-host
 
 go 1.25.0
 

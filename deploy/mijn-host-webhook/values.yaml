@@ -1,7 +1,7 @@
 groupName: acme.mijn.host
 
 image:
-  repository: ghcr.io/mijn-host/cert-manager-webhook-mijn-host
+  repository: ghcr.io/sircuri/cert-manager-webhook-mijn-host
   tag: ""
   pullPolicy: IfNotPresent
 
