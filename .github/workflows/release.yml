@@ -83,7 +83,7 @@ jobs:
 
       - name: Package Helm chart
         run: |
-          helm package deploy/chart \
+          helm package deploy/mijn-host-webhook \
             --version "${{ steps.version.outputs.version }}" \
             --app-version "${{ steps.version.outputs.version }}" \
             --destination .helm-packages
