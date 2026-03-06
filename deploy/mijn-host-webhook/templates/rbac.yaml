@@ -1,0 +1,28 @@
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: {{ include "mijn-host-webhook.fullname" . }}:secret-reader
+  namespace: {{ .Values.certManager.namespace }}
+  labels:
+    {{- include "mijn-host-webhook.labels" . | nindent 4 }}
+rules:
+  - apiGroups: [""]
+    resources: ["secrets"]
+    resourceNames: [{{ .Values.secretName | quote }}]
+    verbs: ["get"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: {{ include "mijn-host-webhook.fullname" . }}:secret-reader
+  namespace: {{ .Values.certManager.namespace }}
+  labels:
+    {{- include "mijn-host-webhook.labels" . | nindent 4 }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: {{ include "mijn-host-webhook.fullname" . }}:secret-reader
+subjects:
+  - kind: ServiceAccount
+    name: {{ include "mijn-host-webhook.serviceAccountName" . }}
+    namespace: {{ .Release.Namespace }}

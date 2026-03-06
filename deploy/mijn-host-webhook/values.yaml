@@ -1,0 +1,28 @@
+groupName: acme.mijn.host
+
+image:
+  repository: ghcr.io/mijn-host/cert-manager-webhook-mijn-host
+  tag: ""
+  pullPolicy: IfNotPresent
+
+nameOverride: ""
+fullnameOverride: ""
+
+serviceAccount:
+  create: true
+  name: ""
+  annotations: {}
+
+certManager:
+  namespace: cert-manager
+  serviceAccountName: cert-manager
+
+secretName: mijn-host-api-key
+
+replicaCount: 1
+
+resources: {}
+
+nodeSelector: {}
+tolerations: []
+affinity: {}
