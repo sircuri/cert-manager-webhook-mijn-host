@@ -1,4 +1,4 @@
-groupName: acme.mijn.host
+groupName: acme.vanefferenonline.nl
 
 image:
   repository: ghcr.io/sircuri/cert-manager-webhook-mijn-host

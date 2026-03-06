@@ -73,7 +73,7 @@ spec:
     solvers:
       - dns01:
           webhook:
-            groupName: acme.mijn.host
+            groupName: acme.vanefferenonline.nl
             solverName: mijn-host
             config:
               apiKeySecretRef:
@@ -279,7 +279,7 @@ Verify the webhook pod is running and the Service is correctly configured:
 ```bash
 kubectl get pods -n cert-manager -l app.kubernetes.io/name=mijn-host-webhook
 kubectl get svc -n cert-manager
-kubectl get apiservice v1alpha1.acme.mijn.host
+kubectl get apiservice v1alpha1.acme.vanefferenonline.nl
 ```
 
 The APIService should show `Available: True`. If not, check that the
