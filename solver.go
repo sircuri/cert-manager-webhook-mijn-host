@@ -14,9 +14,26 @@ import (
 
 const groupName = "acme.mijn.host"
 
+// dnsClient abstracts DNS operations for testability.
+type dnsClient interface {
+	AddTXTRecord(ctx context.Context, zone, name, value string, ttl int) error
+	RemoveTXTRecord(ctx context.Context, zone, name, value string) error
+}
+
+// clientFactory creates a dnsClient from an API key.
+type clientFactory func(apiKey string) dnsClient
+
+// defaultClientFactory returns a factory that creates real mijn.host clients.
+func defaultClientFactory() clientFactory {
+	return func(apiKey string) dnsClient {
+		return mijnhost.NewClient(apiKey)
+	}
+}
+
 // mijnHostSolver implements the webhook.Solver interface for mijn.host DNS.
 type mijnHostSolver struct {
-	kubeClient kubernetes.Interface
+	kubeClient    kubernetes.Interface
+	newDNSClient  clientFactory
 }
 
 func (s *mijnHostSolver) Name() string {
@@ -46,7 +63,7 @@ func (s *mijnHostSolver) Present(ch *v1alpha1.ChallengeRequest) error {
 	zone := strings.TrimSuffix(ch.ResolvedZone, ".")
 	fqdn := strings.TrimSuffix(ch.ResolvedFQDN, ".")
 
-	client := mijnhost.NewClient(apiKey)
+	client := s.getClientFactory()(apiKey)
 	return client.AddTXTRecord(context.Background(), zone, fqdn, ch.Key, cfg.TTL)
 }
 
@@ -64,8 +81,15 @@ func (s *mijnHostSolver) CleanUp(ch *v1alpha1.ChallengeRequest) error {
 	zone := strings.TrimSuffix(ch.ResolvedZone, ".")
 	fqdn := strings.TrimSuffix(ch.ResolvedFQDN, ".")
 
-	client := mijnhost.NewClient(apiKey)
+	client := s.getClientFactory()(apiKey)
 	return client.RemoveTXTRecord(context.Background(), zone, fqdn, ch.Key)
+}
+
+func (s *mijnHostSolver) getClientFactory() clientFactory {
+	if s.newDNSClient != nil {
+		return s.newDNSClient
+	}
+	return defaultClientFactory()
 }
 
 // getAPIKey reads the API key from a Kubernetes Secret.
