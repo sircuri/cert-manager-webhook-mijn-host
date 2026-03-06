@@ -6,13 +6,11 @@ import (
 	"github.com/cert-manager/cert-manager/pkg/acme/webhook/cmd"
 )
 
-// GroupName is the API group name for this webhook solver.
-var GroupName = os.Getenv("GROUP_NAME")
-
 func main() {
-	if GroupName == "" {
-		GroupName = "acme.mijn.host"
+	gn := os.Getenv("GROUP_NAME")
+	if gn == "" {
+		gn = groupName
 	}
 
-	cmd.RunWebhookServer(GroupName, &solver{})
+	cmd.RunWebhookServer(gn, &mijnHostSolver{})
 }
