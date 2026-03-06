@@ -6,6 +6,36 @@ Let's Encrypt (or any ACME CA) by completing DNS-01 challenges through the
 mijn.host API. Wildcard certificates require DNS-01 validation and are never
 logged to Certificate Transparency logs, keeping internal hostnames private.
 
+---
+
+> **WARNING — WORK IN PROGRESS — USE AT YOUR OWN RISK**
+>
+> This project is in active development and is **not yet considered stable**.
+> There are no guarantees of correctness or safety. **Use it at your own risk.**
+>
+> **Important: how the mijn.host API works (and why you should care)**
+>
+> The mijn.host API **does not support adding, modifying, or deleting individual
+> DNS records**. Instead, every update works like this:
+>
+> 1. **Read** — the webhook fetches *all* DNS records for the zone from
+>    mijn.host.
+> 2. **Modify in memory** — the required change (e.g. adding or removing an
+>    ACME challenge TXT record) is applied in memory using the Go DNS library.
+> 3. **Write back** — the *entire* modified record set is pushed back to
+>    mijn.host, **replacing all existing records**.
+>
+> This means that **if something goes wrong during the process — a bug, an
+> unexpected API response, or a malformed record — you could lose DNS records
+> for your entire zone**. There is no atomic "add one record" or "delete one
+> record" operation; every write is a full overwrite.
+>
+> The authors of this project accept **no liability** for lost or corrupted DNS
+> records. Make sure you have a backup of your DNS zone before using this
+> webhook, and test thoroughly in a non-production environment first.
+
+---
+
 ## Prerequisites
 
 - A Kubernetes cluster (v1.24+)
