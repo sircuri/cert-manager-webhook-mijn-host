@@ -68,19 +68,19 @@ func (m *mockServer) handler(w http.ResponseWriter, r *http.Request) {
 				"records": m.records,
 			},
 		}
-		json.NewEncoder(w).Encode(resp)
+		_ = json.NewEncoder(w).Encode(resp)
 
 	case http.MethodPut:
 		var payload struct {
 			Records []dnsRecord `json:"records"`
 		}
-		json.Unmarshal(body, &payload)
+		_ = json.Unmarshal(body, &payload)
 		m.records = payload.Records
 		resp := map[string]any{
 			"status":             200,
 			"status_description": "OK",
 		}
-		json.NewEncoder(w).Encode(resp)
+		_ = json.NewEncoder(w).Encode(resp)
 
 	default:
 		w.WriteHeader(http.StatusMethodNotAllowed)
@@ -239,7 +239,7 @@ func TestAddTXTRecord_APIError(t *testing.T) {
 	// Create a server that returns an error status.
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("content-type", "application/json")
-		json.NewEncoder(w).Encode(map[string]any{
+		_ = json.NewEncoder(w).Encode(map[string]any{
 			"status":             500,
 			"status_description": "Internal Server Error",
 			"data": map[string]any{

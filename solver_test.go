@@ -64,9 +64,9 @@ func fakeSecret(namespace, name, key, value string) *corev1.Secret {
 }
 
 func newTestSolver(fc *fakeDNSClient, secrets ...*corev1.Secret) *mijnHostSolver {
-	fakeClient := fake.NewSimpleClientset()
+	fakeClient := fake.NewClientset()
 	for _, s := range secrets {
-		fakeClient.CoreV1().Secrets(s.Namespace).Create(context.Background(), s.DeepCopy(), metav1.CreateOptions{})
+		_, _ = fakeClient.CoreV1().Secrets(s.Namespace).Create(context.Background(), s.DeepCopy(), metav1.CreateOptions{})
 	}
 
 	return &mijnHostSolver{
