@@ -1,0 +1,11 @@
+.mm/
+webhook
+vendor/
+testdata/mijn-host/secret.yaml
+testdata/mijn-host/config.json
+*.exe
+*.dll
+*.so
+*.dylib
+*.test
+*.out
