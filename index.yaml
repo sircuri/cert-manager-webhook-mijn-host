@@ -2,8 +2,18 @@ apiVersion: v1
 entries:
   mijn-host-webhook:
   - apiVersion: v2
+    appVersion: 0.3.0
+    created: "2026-03-07T18:51:27.116133085Z"
+    description: A Helm chart for the cert-manager webhook for mijn.host DNS solver
+    digest: 6a23a4141f1dc71a05f048425ec65c38f3606f5db6a4c23081228a215d222644
+    name: mijn-host-webhook
+    type: application
+    urls:
+    - https://sircuri.github.io/cert-manager-webhook-mijn-host/mijn-host-webhook-0.3.0.tgz
+    version: 0.3.0
+  - apiVersion: v2
     appVersion: 0.2.0
-    created: "2026-03-07T18:39:24.20492441Z"
+    created: "2026-03-07T18:51:27.115604095Z"
     description: A Helm chart for the cert-manager webhook for mijn.host DNS solver
     digest: 79adf4a90ae5d6babdc2efd45248b545a56b2bbd6502849c8abc84127c7d84c6
     name: mijn-host-webhook
@@ -13,7 +23,7 @@ entries:
     version: 0.2.0
   - apiVersion: v2
     appVersion: 0.1.0
-    created: "2026-03-07T18:39:24.204602216Z"
+    created: "2026-03-07T18:51:27.115123356Z"
     description: A Helm chart for the cert-manager webhook for mijn.host DNS solver
     digest: fe4c2bd98e8675ae693d42ec55a12a8658c5e8ebeeb2ffdf55ce85d5cb675933
     name: mijn-host-webhook
@@ -21,4 +31,4 @@ entries:
     urls:
     - https://sircuri.github.io/cert-manager-webhook-mijn-host/mijn-host-webhook-0.1.0.tgz
     version: 0.1.0
-generated: "2026-03-07T18:39:24.204223396Z"
+generated: "2026-03-07T18:51:27.114640133Z"
