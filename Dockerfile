@@ -8,7 +8,7 @@ COPY go.mod go.sum ./
 RUN go mod download
 
 COPY . .
-RUN GOOS=$TARGETOS GOARCH=$TARGETARCH go build -o webhook .
+RUN CGO_ENABLED=0 GOOS=$TARGETOS GOARCH=$TARGETARCH go build -o webhook .
 
 FROM gcr.io/distroless/static:nonroot
 
