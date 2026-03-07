@@ -53,20 +53,22 @@ logged to Certificate Transparency logs, keeping internal hostnames private.
 
 ## Installation
 
-Add the webhook to your cluster using Helm:
+Add the Helm repository and install the webhook:
 
 ```bash
-helm install mijn-host-webhook ./deploy/mijn-host-webhook \
+helm repo add mijn-host https://sircuri.github.io/cert-manager-webhook-mijn-host
+helm repo update
+helm install mijn-host-webhook mijn-host/mijn-host-webhook \
   --namespace cert-manager
 ```
 
-To customize settings (e.g. image tag, secret name), pass `--set` flags or
-provide a custom `values.yaml`:
+To customize settings (e.g. secret name), pass `--set` flags or provide a
+custom `values.yaml`:
 
 ```bash
-helm install mijn-host-webhook ./deploy/mijn-host-webhook \
+helm install mijn-host-webhook mijn-host/mijn-host-webhook \
   --namespace cert-manager \
-  --set image.tag=v0.1.0
+  --values my-values.yaml
 ```
 
 ## Configuration
@@ -85,12 +87,6 @@ metadata:
 type: Opaque
 stringData:
   api-key: "your-mijn-host-api-key-here"
-```
-
-Apply it:
-
-```bash
-kubectl apply -f examples/secret.yaml
 ```
 
 ### 2. Create a ClusterIssuer
@@ -118,12 +114,6 @@ spec:
                 name: mijn-host-api-key
                 key: api-key
               ttl: 300
-```
-
-Apply it:
-
-```bash
-kubectl apply -f examples/clusterissuer.yaml
 ```
 
 ### Solver config reference
@@ -154,12 +144,6 @@ spec:
     - "example.com"
 ```
 
-Apply it:
-
-```bash
-kubectl apply -f examples/certificate.yaml
-```
-
 Monitor progress:
 
 ```bash
@@ -168,17 +152,26 @@ kubectl describe order -n default
 kubectl describe challenge -n default
 ```
 
-## Testing locally
+## Development
+
+### Running unit tests
+
+```bash
+go test ./...
+```
+
+### Testing locally with kind
 
 You can test the full flow locally using [kind](https://kind.sigs.k8s.io/).
+This builds the image from source and installs the chart from the local checkout.
 
-### 1. Create a kind cluster
+#### 1. Create a kind cluster
 
 ```bash
 kind create cluster --name webhook-test
 ```
 
-### 2. Install cert-manager
+#### 2. Install cert-manager
 
 ```bash
 helm repo add jetstack https://charts.jetstack.io --force-update
@@ -187,14 +180,14 @@ helm install cert-manager jetstack/cert-manager \
   --set crds.enabled=true
 ```
 
-### 3. Build and load the webhook image
+#### 3. Build and load the webhook image
 
 ```bash
 docker build -t mijn-host-webhook:dev .
 kind load docker-image mijn-host-webhook:dev --name webhook-test
 ```
 
-### 4. Install the webhook
+#### 4. Install the webhook from the local chart
 
 ```bash
 helm install mijn-host-webhook ./deploy/mijn-host-webhook \
@@ -204,7 +197,7 @@ helm install mijn-host-webhook ./deploy/mijn-host-webhook \
   --set image.pullPolicy=Never
 ```
 
-### 5. Apply the Secret, ClusterIssuer, and Certificate
+#### 5. Apply the Secret, ClusterIssuer, and Certificate
 
 ```bash
 kubectl apply -f examples/secret.yaml    # edit with your real API key first
@@ -212,45 +205,28 @@ kubectl apply -f examples/clusterissuer.yaml
 kubectl apply -f examples/certificate.yaml
 ```
 
-### 6. Verify
+#### 6. Verify
 
 ```bash
 kubectl get certificate -A
 kubectl get challenges -A
 ```
 
-### Cleanup
+#### Cleanup
 
 ```bash
 kind delete cluster --name webhook-test
 ```
 
-## Running conformance tests
+### Running conformance tests
 
-The cert-manager project provides a conformance test suite for webhook solvers.
-
-### 1. Clone and prepare
-
-```bash
-git clone https://github.com/cert-manager/cert-manager.git
-cd cert-manager
-```
-
-### 2. Set up test fixtures
-
-Create a `testdata/` directory in the webhook project with the required fixture
-files for the solver conformance suite. Refer to the
-[cert-manager webhook testing docs](https://cert-manager.io/docs/configuration/acme/dns01/webhook/#running-the-test-suite)
-for the expected structure.
-
-### 3. Run the tests
+The cert-manager conformance test suite exercises `Present` and `CleanUp`
+against the real mijn.host API. Use a dedicated test domain — not one with
+important DNS records.
 
 ```bash
-go test -v ./... -run TestRunsSuite
+TEST_ZONE_NAME=yourtestdomain.nl. go test -tags=conformance -v -run TestConformance
 ```
-
-The suite will exercise `Present` and `CleanUp` against a real or simulated DNS
-provider. Ensure your API key is configured for the test environment.
 
 ## Troubleshooting
 
