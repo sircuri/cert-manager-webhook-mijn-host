@@ -16,31 +16,20 @@ logged to Certificate Transparency logs, keeping internal hostnames private.
 
 ---
 
-> **WARNING — WORK IN PROGRESS — USE AT YOUR OWN RISK**
+> **Note — use at your own risk**
 >
-> This project is in active development and is **not yet considered stable**.
-> There are no guarantees of correctness or safety. **Use it at your own risk.**
+> This project is functional but still maturing. Use it at your own risk.
 >
-> **Important: how the mijn.host API works (and why you should care)**
+> **How the mijn.host API works**
 >
-> The mijn.host API **does not support adding, modifying, or deleting individual
-> DNS records**. Instead, every update works like this:
+> The mijn.host API does not support adding or deleting individual DNS records.
+> Every update is a read-modify-write cycle: the webhook fetches all records for
+> the zone, applies the change in memory, and writes the entire record set back.
+> This means a bug or unexpected API response could potentially affect other
+> records in the zone.
 >
-> 1. **Read** — the webhook fetches *all* DNS records for the zone from
->    mijn.host.
-> 2. **Modify in memory** — the required change (e.g. adding or removing an
->    ACME challenge TXT record) is applied in memory using the Go DNS library.
-> 3. **Write back** — the *entire* modified record set is pushed back to
->    mijn.host, **replacing all existing records**.
->
-> This means that **if something goes wrong during the process — a bug, an
-> unexpected API response, or a malformed record — you could lose DNS records
-> for your entire zone**. There is no atomic "add one record" or "delete one
-> record" operation; every write is a full overwrite.
->
-> The authors of this project accept **no liability** for lost or corrupted DNS
-> records. Make sure you have a backup of your DNS zone before using this
-> webhook, and test thoroughly in a non-production environment first.
+> **Recommendation:** test with Let's Encrypt staging first, and keep a backup
+> of your DNS zone before using this webhook in production.
 
 ---
 
@@ -91,7 +80,34 @@ stringData:
 
 ### 2. Create a ClusterIssuer
 
-Create a ClusterIssuer that uses Let's Encrypt with the mijn-host DNS solver:
+It is recommended to start with Let's Encrypt **staging** to verify everything
+works before switching to production:
+
+```yaml
+apiVersion: cert-manager.io/v1
+kind: ClusterIssuer
+metadata:
+  name: letsencrypt-staging
+spec:
+  acme:
+    email: your-email@example.com
+    server: https://acme-staging-v02.api.letsencrypt.org/directory
+    privateKeySecretRef:
+      name: letsencrypt-staging-account-key
+    solvers:
+      - dns01:
+          webhook:
+            groupName: acme.mijn-host.vanefferenonline.nl
+            solverName: mijn-host
+            config:
+              apiKeySecretRef:
+                name: mijn-host-api-key
+                key: api-key
+              ttl: 300
+```
+
+Once staging works, create a production issuer by changing the server URL and
+secret name:
 
 ```yaml
 apiVersion: cert-manager.io/v1
@@ -150,6 +166,23 @@ Monitor progress:
 kubectl describe certificate wildcard-example-com -n default
 kubectl describe order -n default
 kubectl describe challenge -n default
+```
+
+### Known limitation: concurrent challenges
+
+When a certificate includes both a wildcard and a bare domain (e.g.
+`*.example.com` and `example.com`), cert-manager creates two DNS-01 challenges
+for the same `_acme-challenge` TXT record. Because the mijn.host API replaces
+the entire record set on every write, concurrent challenge updates can
+occasionally overwrite each other, causing the first attempt to fail.
+
+cert-manager will automatically retry with a new order after a backoff period
+(up to an hour), and the retry typically succeeds. If you don't want to wait,
+you can speed things up by deleting and recreating the Certificate resource:
+
+```bash
+kubectl delete certificate <name> -n <namespace>
+kubectl apply -f certificate.yaml
 ```
 
 ## Development
