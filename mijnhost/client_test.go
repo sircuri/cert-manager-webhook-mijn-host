@@ -263,3 +263,97 @@ func TestAddTXTRecord_APIError(t *testing.T) {
 		t.Fatal("expected error from API, got nil")
 	}
 }
+
+func TestAddTXTRecord_ConcurrentPresent(t *testing.T) {
+	// Simulate cert-manager presenting wildcard + bare domain challenges
+	// concurrently. Both must result in two distinct TXT records.
+	m := newMockServer([]dnsRecord{
+		{Type: "A", Name: "example.com.", Value: "1.2.3.4", TTL: 3600},
+	})
+	defer m.close()
+	c := newTestClient(m)
+
+	var wg sync.WaitGroup
+	errs := make([]error, 2)
+
+	wg.Add(2)
+	go func() {
+		defer wg.Done()
+		errs[0] = c.AddTXTRecord(context.Background(), "example.com", "_acme-challenge.example.com", "bare-domain-token", 300)
+	}()
+	go func() {
+		defer wg.Done()
+		errs[1] = c.AddTXTRecord(context.Background(), "example.com", "_acme-challenge.example.com", "wildcard-token", 300)
+	}()
+	wg.Wait()
+
+	for i, err := range errs {
+		if err != nil {
+			t.Fatalf("goroutine %d: unexpected error: %v", i, err)
+		}
+	}
+
+	// Both TXT records must exist alongside the original A record.
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	if len(m.records) != 3 {
+		t.Fatalf("expected 3 records (1 A + 2 TXT), got %d: %+v", len(m.records), m.records)
+	}
+
+	values := make(map[string]bool)
+	for _, rec := range m.records {
+		if rec.Type == "TXT" {
+			values[rec.Value] = true
+		}
+	}
+	if !values["bare-domain-token"] {
+		t.Error("missing TXT record for bare-domain-token")
+	}
+	if !values["wildcard-token"] {
+		t.Error("missing TXT record for wildcard-token")
+	}
+}
+
+func TestRemoveTXTRecord_ConcurrentCleanUp(t *testing.T) {
+	// Simulate cert-manager cleaning up both challenges concurrently.
+	// Both TXT records must be removed, A record must remain.
+	m := newMockServer([]dnsRecord{
+		{Type: "A", Name: "example.com.", Value: "1.2.3.4", TTL: 3600},
+		{Type: "TXT", Name: "_acme-challenge.example.com.", Value: "bare-domain-token", TTL: 300},
+		{Type: "TXT", Name: "_acme-challenge.example.com.", Value: "wildcard-token", TTL: 300},
+	})
+	defer m.close()
+	c := newTestClient(m)
+
+	var wg sync.WaitGroup
+	errs := make([]error, 2)
+
+	wg.Add(2)
+	go func() {
+		defer wg.Done()
+		errs[0] = c.RemoveTXTRecord(context.Background(), "example.com", "_acme-challenge.example.com", "bare-domain-token")
+	}()
+	go func() {
+		defer wg.Done()
+		errs[1] = c.RemoveTXTRecord(context.Background(), "example.com", "_acme-challenge.example.com", "wildcard-token")
+	}()
+	wg.Wait()
+
+	for i, err := range errs {
+		if err != nil {
+			t.Fatalf("goroutine %d: unexpected error: %v", i, err)
+		}
+	}
+
+	// Only the A record should remain.
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	if len(m.records) != 1 {
+		t.Fatalf("expected 1 record (A only), got %d: %+v", len(m.records), m.records)
+	}
+	if m.records[0].Type != "A" {
+		t.Errorf("expected remaining record to be A, got %s", m.records[0].Type)
+	}
+}
