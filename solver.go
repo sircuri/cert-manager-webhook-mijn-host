@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"strings"
+	"sync"
 
 	"github.com/sircuri/cert-manager-webhook-mijn-host/mijnhost"
 	"github.com/cert-manager/cert-manager/pkg/acme/webhook/apis/acme/v1alpha1"
@@ -23,17 +24,17 @@ type dnsClient interface {
 // clientFactory creates a dnsClient from an API key.
 type clientFactory func(apiKey string) dnsClient
 
-// defaultClientFactory returns a factory that creates real mijn.host clients.
-func defaultClientFactory() clientFactory {
-	return func(apiKey string) dnsClient {
-		return mijnhost.NewClient(apiKey)
-	}
-}
-
 // mijnHostSolver implements the webhook.Solver interface for mijn.host DNS.
+// It reuses a single dnsClient per API key so that the underlying provider's
+// mutex serializes concurrent read-modify-write operations on the same zone.
+// This is critical because the mijn.host API uses full-zone PUT, and cert-manager
+// calls Present() concurrently for wildcard + bare domain challenges.
 type mijnHostSolver struct {
-	kubeClient    kubernetes.Interface
-	newDNSClient  clientFactory
+	kubeClient   kubernetes.Interface
+	newDNSClient clientFactory
+
+	mu      sync.Mutex
+	clients map[string]dnsClient
 }
 
 func (s *mijnHostSolver) Name() string {
@@ -47,6 +48,29 @@ func (s *mijnHostSolver) Initialize(kubeClientConfig *rest.Config, stopCh <-chan
 	}
 	s.kubeClient = cl
 	return nil
+}
+
+// getClient returns a shared dnsClient for the given API key. A single client
+// is reused across requests so that the provider's internal mutex protects
+// against concurrent read-modify-write races on the mijn.host API.
+func (s *mijnHostSolver) getClient(apiKey string) dnsClient {
+	if s.newDNSClient != nil {
+		return s.newDNSClient(apiKey)
+	}
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	if s.clients == nil {
+		s.clients = make(map[string]dnsClient)
+	}
+	if c, ok := s.clients[apiKey]; ok {
+		return c
+	}
+
+	c := mijnhost.NewClient(apiKey)
+	s.clients[apiKey] = c
+	return c
 }
 
 func (s *mijnHostSolver) Present(ch *v1alpha1.ChallengeRequest) error {
@@ -63,7 +87,7 @@ func (s *mijnHostSolver) Present(ch *v1alpha1.ChallengeRequest) error {
 	zone := strings.TrimSuffix(ch.ResolvedZone, ".")
 	fqdn := strings.TrimSuffix(ch.ResolvedFQDN, ".")
 
-	client := s.getClientFactory()(apiKey)
+	client := s.getClient(apiKey)
 	return client.AddTXTRecord(context.Background(), zone, fqdn, ch.Key, cfg.TTL)
 }
 
@@ -81,15 +105,8 @@ func (s *mijnHostSolver) CleanUp(ch *v1alpha1.ChallengeRequest) error {
 	zone := strings.TrimSuffix(ch.ResolvedZone, ".")
 	fqdn := strings.TrimSuffix(ch.ResolvedFQDN, ".")
 
-	client := s.getClientFactory()(apiKey)
+	client := s.getClient(apiKey)
 	return client.RemoveTXTRecord(context.Background(), zone, fqdn, ch.Key)
-}
-
-func (s *mijnHostSolver) getClientFactory() clientFactory {
-	if s.newDNSClient != nil {
-		return s.newDNSClient
-	}
-	return defaultClientFactory()
 }
 
 // getAPIKey reads the API key from a Kubernetes Secret.
