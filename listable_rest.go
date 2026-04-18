@@ -53,7 +53,12 @@ func (l *ChallengePayloadList) DeepCopyObject() runtime.Object {
 // cert-manager scheme group, so registration must happen after GROUP_NAME is
 // read.
 func registerListTypes(gv schema.GroupVersion) {
+	// Register under the endpoint's SolverGroup so the installer can resolve
+	// the list/watch option kinds, and under cert-manager's static scheme group
+	// so response serialization (which converts to the REST's "native" group
+	// derived from challengepayload.REST.GroupVersionKind) can find it.
 	apiserver.Scheme.AddKnownTypes(gv, &ChallengePayloadList{})
+	apiserver.Scheme.AddKnownTypes(v1alpha1.SchemeGroupVersion, &ChallengePayloadList{})
 	metav1.AddToGroupVersion(apiserver.Scheme, gv)
 }
 
