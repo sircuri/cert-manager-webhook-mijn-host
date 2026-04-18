@@ -1,9 +1,12 @@
 package main
 
 import (
+	"context"
 	"os"
+	"os/signal"
+	"syscall"
 
-	"github.com/cert-manager/cert-manager/pkg/acme/webhook/cmd"
+	logf "github.com/cert-manager/cert-manager/pkg/logs"
 )
 
 func main() {
@@ -12,5 +15,11 @@ func main() {
 		gn = groupName
 	}
 
-	cmd.RunWebhookServer(gn, &mijnHostSolver{})
+	ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
+	defer cancel()
+
+	if err := runWebhookServer(ctx, gn, &mijnHostSolver{}); err != nil {
+		logf.Log.Error(err, "error running webhook server")
+		os.Exit(1)
+	}
 }
