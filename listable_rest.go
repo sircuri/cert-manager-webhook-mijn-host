@@ -35,7 +35,7 @@ func (l *ChallengePayloadList) DeepCopyObject() runtime.Object {
 	}
 	out := &ChallengePayloadList{
 		TypeMeta: l.TypeMeta,
-		ListMeta: *l.ListMeta.DeepCopy(),
+		ListMeta: *l.DeepCopy(),
 	}
 	if l.Items != nil {
 		out.Items = make([]v1alpha1.ChallengePayload, len(l.Items))
