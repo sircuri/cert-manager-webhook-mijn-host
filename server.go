@@ -85,6 +85,7 @@ func runAPIServer(ctx context.Context, opts *genericoptions.RecommendedOptions, 
 	}
 
 	gv := schema.GroupVersion{Group: groupName, Version: "v1alpha1"}
+	registerListTypes(gv)
 	challengeHandler := newListableREST(challengepayload.NewREST(solver), solver.Name())
 
 	apiGroupInfo := genericapiserver.APIGroupInfo{

@@ -42,8 +42,15 @@ func (l *ChallengePayloadList) DeepCopyObject() runtime.Object {
 	return out
 }
 
-func init() {
-	apiserver.Scheme.AddKnownTypes(v1alpha1.SchemeGroupVersion, &ChallengePayloadList{})
+// registerListTypes registers ChallengePayloadList and common metav1 types
+// (including WatchEvent) under the webhook's runtime-configured SolverGroup.
+// The apiserver installer resolves the versioned list/watch types against the
+// endpoint's GroupVersion (the SolverGroup), not against the static
+// cert-manager scheme group, so registration must happen after GROUP_NAME is
+// read.
+func registerListTypes(gv schema.GroupVersion) {
+	apiserver.Scheme.AddKnownTypes(gv, &ChallengePayloadList{})
+	metav1.AddToGroupVersion(apiserver.Scheme, gv)
 }
 
 // listableREST wraps challengepayload.REST so the generic apiserver also
