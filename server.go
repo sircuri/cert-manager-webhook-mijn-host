@@ -8,7 +8,6 @@ import (
 	"github.com/cert-manager/cert-manager/pkg/acme/webhook"
 	whapi "github.com/cert-manager/cert-manager/pkg/acme/webhook/apis/acme/v1alpha1"
 	"github.com/cert-manager/cert-manager/pkg/acme/webhook/apiserver"
-	cmopenapi "github.com/cert-manager/cert-manager/pkg/acme/webhook/openapi"
 	"github.com/cert-manager/cert-manager/pkg/acme/webhook/registry/challengepayload"
 	logf "github.com/cert-manager/cert-manager/pkg/logs"
 	"github.com/spf13/cobra"
@@ -73,8 +72,8 @@ func runAPIServer(ctx context.Context, opts *genericoptions.RecommendedOptions, 
 	}
 
 	serverConfig.EffectiveVersion = basecompatibility.NewEffectiveVersionFromString("1.1", "", "")
-	serverConfig.OpenAPIConfig = genericapiserver.DefaultOpenAPIConfig(cmopenapi.GetOpenAPIDefinitions, openapi.NewDefinitionNamer(apiserver.Scheme))
-	serverConfig.OpenAPIV3Config = genericapiserver.DefaultOpenAPIV3Config(cmopenapi.GetOpenAPIDefinitions, openapi.NewDefinitionNamer(apiserver.Scheme))
+	serverConfig.OpenAPIConfig = genericapiserver.DefaultOpenAPIConfig(getOpenAPIDefinitions, openapi.NewDefinitionNamer(apiserver.Scheme))
+	serverConfig.OpenAPIV3Config = genericapiserver.DefaultOpenAPIV3Config(getOpenAPIDefinitions, openapi.NewDefinitionNamer(apiserver.Scheme))
 
 	restClientConfig := serverConfig.ClientConfig
 	completed := serverConfig.Complete()

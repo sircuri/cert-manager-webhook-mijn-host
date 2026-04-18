@@ -2,10 +2,12 @@ package main
 
 import (
 	"context"
+	"reflect"
 	"sync"
 
 	"github.com/cert-manager/cert-manager/pkg/acme/webhook/apis/acme/v1alpha1"
 	"github.com/cert-manager/cert-manager/pkg/acme/webhook/apiserver"
+	cmopenapi "github.com/cert-manager/cert-manager/pkg/acme/webhook/openapi"
 	"github.com/cert-manager/cert-manager/pkg/acme/webhook/registry/challengepayload"
 	metainternalversion "k8s.io/apimachinery/pkg/apis/meta/internalversion"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -13,6 +15,8 @@ import (
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/watch"
 	"k8s.io/apiserver/pkg/registry/rest"
+	"k8s.io/kube-openapi/pkg/common"
+	"k8s.io/kube-openapi/pkg/validation/spec"
 )
 
 // ChallengePayloadList exists solely so the webhook can advertise LIST on the
@@ -51,6 +55,69 @@ func (l *ChallengePayloadList) DeepCopyObject() runtime.Object {
 func registerListTypes(gv schema.GroupVersion) {
 	apiserver.Scheme.AddKnownTypes(gv, &ChallengePayloadList{})
 	metav1.AddToGroupVersion(apiserver.Scheme, gv)
+}
+
+// challengePayloadListTypeName returns the key the kube-openapi builder uses
+// to look up the OpenAPI definition for ChallengePayloadList (PkgPath.Name).
+// Deriving it via reflection avoids hard-coding "main.ChallengePayloadList",
+// which changes if the type moves packages.
+func challengePayloadListTypeName() string {
+	t := reflect.TypeOf(ChallengePayloadList{})
+	return t.PkgPath() + "." + t.Name()
+}
+
+// getOpenAPIDefinitions wraps the cert-manager-generated OpenAPI definitions
+// and adds one for ChallengePayloadList. Without it the aggregated apiserver
+// fails to build its OpenAPI spec at startup.
+func getOpenAPIDefinitions(ref common.ReferenceCallback) map[string]common.OpenAPIDefinition {
+	defs := cmopenapi.GetOpenAPIDefinitions(ref)
+	defs[challengePayloadListTypeName()] = common.OpenAPIDefinition{
+		Schema: spec.Schema{
+			SchemaProps: spec.SchemaProps{
+				Description: "ChallengePayloadList is a list of ChallengePayload objects. The webhook never stores any, so the list is always empty; it exists only so the aggregated API advertises LIST.",
+				Type:        []string{"object"},
+				Properties: map[string]spec.Schema{
+					"kind": {
+						SchemaProps: spec.SchemaProps{
+							Description: "Kind is a string value representing the REST resource this object represents.",
+							Type:        []string{"string"},
+						},
+					},
+					"apiVersion": {
+						SchemaProps: spec.SchemaProps{
+							Description: "APIVersion defines the versioned schema of this representation of an object.",
+							Type:        []string{"string"},
+						},
+					},
+					"metadata": {
+						SchemaProps: spec.SchemaProps{
+							Default: map[string]interface{}{},
+							Ref:     ref("k8s.io/apimachinery/pkg/apis/meta/v1.ListMeta"),
+						},
+					},
+					"items": {
+						SchemaProps: spec.SchemaProps{
+							Type: []string{"array"},
+							Items: &spec.SchemaOrArray{
+								Schema: &spec.Schema{
+									SchemaProps: spec.SchemaProps{
+										Default: map[string]interface{}{},
+										Ref:     ref("github.com/cert-manager/cert-manager/pkg/acme/webhook/apis/acme/v1alpha1.ChallengePayload"),
+									},
+								},
+							},
+						},
+					},
+				},
+				Required: []string{"items"},
+			},
+		},
+		Dependencies: []string{
+			"github.com/cert-manager/cert-manager/pkg/acme/webhook/apis/acme/v1alpha1.ChallengePayload",
+			"k8s.io/apimachinery/pkg/apis/meta/v1.ListMeta",
+		},
+	}
+	return defs
 }
 
 // listableREST wraps challengepayload.REST so the generic apiserver also
