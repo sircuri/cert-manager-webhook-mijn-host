@@ -3,11 +3,11 @@ package mijnhost
 import (
 	"context"
 	"encoding/json"
-	"errors"
 	"io"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -362,82 +362,133 @@ func TestRemoveTXTRecord_ConcurrentCleanUp(t *testing.T) {
 	}
 }
 
-// fakePropagator records calls and can return a configured error.
-type fakePropagator struct {
-	mu    sync.Mutex
-	calls []propCall
-	err   error
+// laggyMockServer simulates the mijn.host API's eventual-consistency window:
+// PUT updates the canonical record set immediately, but the next `lagReads`
+// GET requests return the previous (stale) state before the new state
+// becomes visible. This is the exact failure mode that causes wildcard
+// challenges to clobber each other on the live API.
+type laggyMockServer struct {
+	mu        sync.Mutex
+	records   []dnsRecord
+	stale     []dnsRecord
+	lagReads  int
+	server    *httptest.Server
+	getCount  int
+	putCount  int
 }
 
-type propCall struct {
-	zone, fqdn, value string
+func newLaggyMockServer(initial []dnsRecord, lagReads int) *laggyMockServer {
+	m := &laggyMockServer{
+		records:  initial,
+		stale:    append([]dnsRecord(nil), initial...),
+		lagReads: lagReads,
+	}
+	m.server = httptest.NewServer(http.HandlerFunc(m.handler))
+	return m
 }
 
-func (f *fakePropagator) WaitForTXT(_ context.Context, zone, fqdn, value string) error {
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	f.calls = append(f.calls, propCall{zone, fqdn, value})
-	return f.err
+func (m *laggyMockServer) close() { m.server.Close() }
+
+func (m *laggyMockServer) handler(w http.ResponseWriter, r *http.Request) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	w.Header().Set("content-type", "application/json")
+
+	switch r.Method {
+	case http.MethodGet:
+		m.getCount++
+		view := m.records
+		if m.lagReads > 0 {
+			view = m.stale
+			m.lagReads--
+		}
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"status":             200,
+			"status_description": "OK",
+			"data": map[string]any{
+				"domain":  "example.com",
+				"records": view,
+			},
+		})
+	case http.MethodPut:
+		m.putCount++
+		body, _ := io.ReadAll(r.Body)
+		var payload struct {
+			Records []dnsRecord `json:"records"`
+		}
+		_ = json.Unmarshal(body, &payload)
+		m.records = payload.Records
+		// stale view sticks until lagReads runs out
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"status":             200,
+			"status_description": "OK",
+		})
+	default:
+		w.WriteHeader(http.StatusMethodNotAllowed)
+	}
 }
 
-func TestAddTXTRecord_WaitsForPropagation(t *testing.T) {
-	m := newMockServer(nil)
+func newLaggyTestClient(m *laggyMockServer, wait, poll time.Duration) *Client {
+	u, _ := url.Parse(m.server.URL + "/api/v2/")
+	return &Client{
+		provider: &mh.Provider{
+			ApiKey:  "test-api-key",
+			BaseUri: (*mh.ApiBaseUri)(u),
+		},
+		visibilityWait: wait,
+		visibilityPoll: poll,
+	}
+}
+
+func TestAddTXTRecord_WaitsForAPIVisibility(t *testing.T) {
+	// API returns stale state for the first 2 GETs after the PUT, then
+	// becomes consistent. AddTXTRecord must not return until the new value
+	// is visible to a follow-up GetRecords.
+	m := newLaggyMockServer(nil, 2)
 	defer m.close()
-	c := newTestClient(m)
-	prop := &fakePropagator{}
-	c.propagator = prop
-	c.propagationWait = 5 * time.Second
+	c := newLaggyTestClient(m, 5*time.Second, 50*time.Millisecond)
 
 	err := c.AddTXTRecord(context.Background(), "example.com", "_acme-challenge.example.com", "token", 300)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
 
-	if len(prop.calls) != 1 {
-		t.Fatalf("expected 1 propagation call, got %d", len(prop.calls))
+	// Initial GET (idempotency check) + 2 stale GETs + 1 consistent GET = 4 total.
+	if m.getCount < 4 {
+		t.Errorf("expected at least 4 GETs (initial + lag + consistent), got %d", m.getCount)
 	}
-	got := prop.calls[0]
-	if got.zone != "example.com" || got.fqdn != "_acme-challenge.example.com" || got.value != "token" {
-		t.Errorf("unexpected propagation call: %+v", got)
-	}
-}
-
-func TestAddTXTRecord_PropagationOnIdempotentPath(t *testing.T) {
-	// Record already present in the zone — no PUT, but propagation must
-	// still be verified so we don't return success while the existing
-	// record is still propagating across mijn.host edge nodes.
-	m := newMockServer([]dnsRecord{
-		{Type: "TXT", Name: "_acme-challenge.example.com.", Value: "token", TTL: 300},
-	})
-	defer m.close()
-	c := newTestClient(m)
-	prop := &fakePropagator{}
-	c.propagator = prop
-	c.propagationWait = 5 * time.Second
-
-	err := c.AddTXTRecord(context.Background(), "example.com", "_acme-challenge.example.com", "token", 300)
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-
-	if len(prop.calls) != 1 {
-		t.Fatalf("expected 1 propagation call on idempotent path, got %d", len(prop.calls))
+	if m.putCount != 1 {
+		t.Errorf("expected exactly 1 PUT, got %d", m.putCount)
 	}
 }
 
-func TestAddTXTRecord_PropagationErrorPropagates(t *testing.T) {
-	m := newMockServer(nil)
+func TestAddTXTRecord_VisibilityTimeout(t *testing.T) {
+	// API never reflects the write within the budget. AddTXTRecord must
+	// surface a timeout error so cert-manager retries Present rather than
+	// reporting a phantom success.
+	m := newLaggyMockServer(nil, 1000)
 	defer m.close()
-	c := newTestClient(m)
-	propErr := errors.New("propagation timeout")
-	c.propagator = &fakePropagator{err: propErr}
-	c.propagationWait = 5 * time.Second
+	c := newLaggyTestClient(m, 200*time.Millisecond, 30*time.Millisecond)
 
 	err := c.AddTXTRecord(context.Background(), "example.com", "_acme-challenge.example.com", "token", 300)
 	if err == nil {
-		t.Fatal("expected propagation error to be returned")
+		t.Fatal("expected visibility timeout error, got nil")
 	}
-	if !errors.Is(err, propErr) {
-		t.Errorf("expected wrapped propagation error, got: %v", err)
+	if !strings.Contains(err.Error(), "visibility timeout") {
+		t.Errorf("expected visibility timeout in error, got: %v", err)
+	}
+}
+
+func TestAddTXTRecord_VisibilityWaitDisabledByZero(t *testing.T) {
+	// visibilityWait == 0 disables the wait (used by tests with a strongly-
+	// consistent mock). With a perpetually-laggy server and wait=0, the call
+	// must still succeed because the wait is skipped entirely.
+	m := newLaggyMockServer(nil, 1000)
+	defer m.close()
+	c := newLaggyTestClient(m, 0, 0)
+
+	err := c.AddTXTRecord(context.Background(), "example.com", "_acme-challenge.example.com", "token", 300)
+	if err != nil {
+		t.Fatalf("unexpected error with wait disabled: %v", err)
 	}
 }

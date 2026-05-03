@@ -11,48 +11,53 @@ import (
 	"github.com/libdns/mijnhost"
 )
 
-// defaultPropagationWait caps how long AddTXTRecord blocks waiting for the
-// new value to appear at every authoritative NS. Kept under the typical
-// kube-apiserver request timeout (60s) so the webhook call doesn't time out;
-// cert-manager will retry Present() if propagation isn't finished yet.
-const defaultPropagationWait = 50 * time.Second
+// defaultVisibilityWait caps how long AddTXTRecord blocks waiting for the
+// mijn.host API's read view to catch up with a write we just performed.
+// Kept well under the typical kube-apiserver request timeout so the webhook
+// call itself does not time out.
+const defaultVisibilityWait = 30 * time.Second
 
-// Client wraps the libdns/mijnhost Provider to expose DNS operations
-// needed by the cert-manager webhook solver. A single Client instance must
-// be reused across requests so that the mutex serializes concurrent
-// read-modify-write operations against the mijn.host full-zone PUT API.
+// defaultVisibilityPoll is the interval between GetRecords retries while
+// waiting for the API to reflect the just-written record.
+const defaultVisibilityPoll = 1500 * time.Millisecond
+
+// Client wraps the libdns/mijnhost Provider to expose DNS operations needed
+// by the cert-manager webhook solver. A single Client instance must be reused
+// across requests so that the mutex serializes concurrent read-modify-write
+// operations against the mijn.host full-zone PUT API.
 type Client struct {
 	mu       sync.Mutex
 	provider *mijnhost.Provider
 
-	// propagator, when non-nil, is invoked after a successful write to wait
-	// for the new TXT value to be visible at every authoritative NS for the
-	// zone. This closes the read-after-write window of the mijn.host edge.
-	propagator      Propagator
-	propagationWait time.Duration
+	// visibilityWait caps how long AddTXTRecord blocks after a successful
+	// AppendRecords waiting for the mijn.host API to return the new record
+	// on a follow-up GetRecords. Closes the read-after-write window of the
+	// mijn.host backend so the next Present (e.g. the second challenge of a
+	// wildcard order) sees the first challenge's record and appends to it
+	// instead of overwriting it via the full-zone PUT.
+	//
+	// Zero disables the wait (used by tests with a strongly-consistent mock).
+	visibilityWait time.Duration
+	visibilityPoll time.Duration
 }
 
-// NewClient creates a new mijn.host DNS client with the given API key. The
-// returned client is configured to wait for DNS propagation after a write so
-// that cert-manager's self-check and Let's Encrypt's validators see the new
-// TXT record before the webhook reports success.
+// NewClient creates a new mijn.host DNS client with the given API key.
 func NewClient(apiKey string) *Client {
 	return &Client{
 		provider: &mijnhost.Provider{
 			ApiKey: apiKey,
 		},
-		propagator:      NewDNSPropagator(3*time.Second, 5*time.Second),
-		propagationWait: defaultPropagationWait,
+		visibilityWait: defaultVisibilityWait,
+		visibilityPoll: defaultVisibilityPoll,
 	}
 }
 
 // AddTXTRecord adds a TXT record to the given zone. The operation is
 // serialized by the client mutex to prevent concurrent read-modify-write
-// races on the mijn.host full-zone PUT API. It is idempotent: if a
-// matching record already exists, no PUT is issued. After the write (or on
-// the idempotent path) the call blocks until the value is visible at every
-// authoritative NS for the zone, so the caller can rely on the record being
-// resolvable on return.
+// races on the mijn.host full-zone PUT API. It is idempotent: if a matching
+// record already exists, no PUT is issued. After a write, the call blocks
+// (still under the mutex) until the API reflects the new record, so any
+// subsequent caller observes the up-to-date zone state.
 func (c *Client) AddTXTRecord(ctx context.Context, zone string, name string, value string, ttl int) error {
 	relName := toRelativeName(name, zone)
 
@@ -63,30 +68,25 @@ func (c *Client) AddTXTRecord(ctx context.Context, zone string, name string, val
 	if err != nil {
 		return err
 	}
-
-	alreadyPresent := false
 	for _, rec := range existing {
 		rr := rec.RR()
 		if rr.Type == "TXT" && rr.Name == relName && rr.Data == value {
-			alreadyPresent = true
-			break
+			return nil
 		}
 	}
 
-	if !alreadyPresent {
-		_, err = c.provider.AppendRecords(ctx, zone, []libdns.Record{
-			libdns.TXT{
-				Name: relName,
-				TTL:  time.Duration(ttl) * time.Second,
-				Text: value,
-			},
-		})
-		if err != nil {
-			return err
-		}
+	_, err = c.provider.AppendRecords(ctx, zone, []libdns.Record{
+		libdns.TXT{
+			Name: relName,
+			TTL:  time.Duration(ttl) * time.Second,
+			Text: value,
+		},
+	})
+	if err != nil {
+		return err
 	}
 
-	return c.waitForPropagation(ctx, zone, name, value)
+	return c.waitForVisibility(ctx, zone, relName, value)
 }
 
 // RemoveTXTRecord removes a TXT record from the given zone. The operation is
@@ -119,29 +119,53 @@ func (c *Client) RemoveTXTRecord(ctx context.Context, zone string, name string, 
 	return err
 }
 
-// waitForPropagation blocks until the propagator confirms the TXT value is
-// visible at every authoritative NS, or the propagation budget expires. It
-// is a no-op when no propagator is configured (used by tests).
-func (c *Client) waitForPropagation(ctx context.Context, zone, fqdn, value string) error {
-	if c.propagator == nil {
+// waitForVisibility polls provider.GetRecords until the (relName, value) TXT
+// record appears in the API response, or visibilityWait elapses. This
+// guarantees that the next caller's Get-Modify-PUT (libdns AppendRecords)
+// sees the record we just wrote, so it appends to it instead of clobbering it.
+func (c *Client) waitForVisibility(ctx context.Context, zone, relName, value string) error {
+	if c.visibilityWait <= 0 {
 		return nil
 	}
-	wctx, cancel := context.WithTimeout(ctx, c.propagationWait)
-	defer cancel()
-	if err := c.propagator.WaitForTXT(wctx, zone, fqdn, value); err != nil {
-		return fmt.Errorf("waiting for TXT propagation of %s: %w", fqdn, err)
+
+	deadline := time.Now().Add(c.visibilityWait)
+	var lastErr error
+
+	for {
+		recs, err := c.provider.GetRecords(ctx, zone)
+		if err == nil {
+			for _, rec := range recs {
+				rr := rec.RR()
+				if rr.Type == "TXT" && rr.Name == relName && rr.Data == value {
+					return nil
+				}
+			}
+		} else {
+			lastErr = err
+		}
+
+		if time.Now().After(deadline) {
+			if lastErr != nil {
+				return fmt.Errorf("API visibility timeout for %s after %s (last GetRecords error: %w)",
+					relName, c.visibilityWait, lastErr)
+			}
+			return fmt.Errorf("API visibility timeout: %s value not visible after %s", relName, c.visibilityWait)
+		}
+
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(c.visibilityPoll):
+		}
 	}
-	return nil
 }
 
 // toRelativeName strips the zone suffix and any trailing dots from a record name
 // to produce a name relative to the zone (as libdns expects).
 func toRelativeName(name, zone string) string {
-	// Both name and zone may have trailing dots; normalize.
 	name = strings.TrimSuffix(name, ".")
 	zone = strings.TrimSuffix(zone, ".")
 
-	// Strip the zone suffix to get the relative name.
 	rel := strings.TrimSuffix(name, "."+zone)
 	if rel == zone {
 		return "@"
