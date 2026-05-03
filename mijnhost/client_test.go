@@ -6,390 +6,45 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
-	"net/url"
-	"strings"
 	"sync"
 	"testing"
-	"time"
-
-	mh "github.com/libdns/mijnhost"
 )
 
-// dnsRecord mirrors the mijn.host API JSON format.
-type dnsRecord struct {
-	Type  string `json:"type"`
-	Name  string `json:"name"`
-	Value string `json:"value"`
-	TTL   int    `json:"ttl"`
-}
-
-// mockServer creates an httptest server that simulates the mijn.host API.
-// It stores records in memory and handles GET/PUT on /api/v2/domains/{zone}/dns.
+// mockServer simulates the mijn.host API. By default it is strongly
+// consistent: a PUT updates state immediately and the next GET returns it.
+// Set staleReads > 0 to make the next N GETs return the previous (pre-PUT)
+// state, which is the failure mode that breaks wildcard issuance on the
+// real API.
 type mockServer struct {
-	mu      sync.Mutex
-	records []dnsRecord
-	server  *httptest.Server
-	// Track requests for assertions.
-	requests []capturedRequest
+	mu          sync.Mutex
+	records     []DNSRecord
+	stale       []DNSRecord
+	staleReads  int
+	server      *httptest.Server
+	getCount    int
+	putCount    int
+	lastPutBody []DNSRecord
 }
 
-type capturedRequest struct {
-	Method string
-	Path   string
-	Body   string
-}
-
-func newMockServer(initial []dnsRecord) *mockServer {
+func newMockServer(initial []DNSRecord) *mockServer {
 	m := &mockServer{
-		records: initial,
+		records: append([]DNSRecord(nil), initial...),
+		stale:   append([]DNSRecord(nil), initial...),
 	}
 	m.server = httptest.NewServer(http.HandlerFunc(m.handler))
 	return m
+}
+
+func (m *mockServer) close() { m.server.Close() }
+
+func (m *mockServer) setStaleReads(n int) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.stale = append([]DNSRecord(nil), m.records...)
+	m.staleReads = n
 }
 
 func (m *mockServer) handler(w http.ResponseWriter, r *http.Request) {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-
-	body, _ := io.ReadAll(r.Body)
-	m.requests = append(m.requests, capturedRequest{
-		Method: r.Method,
-		Path:   r.URL.Path,
-		Body:   string(body),
-	})
-
-	w.Header().Set("content-type", "application/json")
-
-	switch r.Method {
-	case http.MethodGet:
-		resp := map[string]any{
-			"status":             200,
-			"status_description": "OK",
-			"data": map[string]any{
-				"domain":  "example.com",
-				"records": m.records,
-			},
-		}
-		_ = json.NewEncoder(w).Encode(resp)
-
-	case http.MethodPut:
-		var payload struct {
-			Records []dnsRecord `json:"records"`
-		}
-		_ = json.Unmarshal(body, &payload)
-		m.records = payload.Records
-		resp := map[string]any{
-			"status":             200,
-			"status_description": "OK",
-		}
-		_ = json.NewEncoder(w).Encode(resp)
-
-	default:
-		w.WriteHeader(http.StatusMethodNotAllowed)
-	}
-}
-
-func (m *mockServer) close() {
-	m.server.Close()
-}
-
-// newTestClient creates a Client backed by the mock server. The propagator
-// is left nil so AddTXTRecord does not attempt real DNS lookups during tests.
-func newTestClient(m *mockServer) *Client {
-	u, _ := url.Parse(m.server.URL + "/api/v2/")
-	return &Client{
-		provider: &mh.Provider{
-			ApiKey:  "test-api-key",
-			BaseUri: (*mh.ApiBaseUri)(u),
-		},
-	}
-}
-
-func TestAddTXTRecord_Success(t *testing.T) {
-	m := newMockServer(nil)
-	defer m.close()
-	c := newTestClient(m)
-
-	err := c.AddTXTRecord(context.Background(), "example.com", "_acme-challenge.example.com", "token123", 300)
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-
-	// Verify records were set via PUT.
-	m.mu.Lock()
-	defer m.mu.Unlock()
-
-	if len(m.records) != 1 {
-		t.Fatalf("expected 1 record, got %d", len(m.records))
-	}
-	rec := m.records[0]
-	if rec.Type != "TXT" {
-		t.Errorf("expected type TXT, got %s", rec.Type)
-	}
-	if rec.Value != "token123" {
-		t.Errorf("expected value token123, got %s", rec.Value)
-	}
-	if rec.TTL != 300 {
-		t.Errorf("expected TTL 300, got %d", rec.TTL)
-	}
-}
-
-func TestAddTXTRecord_Idempotent(t *testing.T) {
-	// Start with an existing matching record.
-	m := newMockServer([]dnsRecord{
-		{Type: "TXT", Name: "_acme-challenge.example.com.", Value: "token123", TTL: 300},
-	})
-	defer m.close()
-	c := newTestClient(m)
-
-	// First call — record exists, should be idempotent (no PUT).
-	err := c.AddTXTRecord(context.Background(), "example.com", "_acme-challenge.example.com", "token123", 300)
-	if err != nil {
-		t.Fatalf("first call: unexpected error: %v", err)
-	}
-
-	// Second call — still idempotent.
-	err = c.AddTXTRecord(context.Background(), "example.com", "_acme-challenge.example.com", "token123", 300)
-	if err != nil {
-		t.Fatalf("second call: unexpected error: %v", err)
-	}
-
-	// Verify only GET requests were made (no PUT since record already exists).
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	for _, req := range m.requests {
-		if req.Method == http.MethodPut {
-			t.Error("expected no PUT requests for idempotent add, but found one")
-		}
-	}
-}
-
-func TestRemoveTXTRecord_Success(t *testing.T) {
-	m := newMockServer([]dnsRecord{
-		{Type: "TXT", Name: "_acme-challenge.example.com.", Value: "token123", TTL: 300},
-		{Type: "A", Name: "example.com.", Value: "1.2.3.4", TTL: 3600},
-	})
-	defer m.close()
-	c := newTestClient(m)
-
-	err := c.RemoveTXTRecord(context.Background(), "example.com", "_acme-challenge.example.com", "token123")
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-
-	// The TXT record should be removed; the A record should remain.
-	m.mu.Lock()
-	defer m.mu.Unlock()
-
-	if len(m.records) != 1 {
-		t.Fatalf("expected 1 remaining record, got %d", len(m.records))
-	}
-	if m.records[0].Type != "A" {
-		t.Errorf("expected remaining record to be A, got %s", m.records[0].Type)
-	}
-}
-
-func TestRemoveTXTRecord_NotFound(t *testing.T) {
-	m := newMockServer([]dnsRecord{
-		{Type: "A", Name: "example.com.", Value: "1.2.3.4", TTL: 3600},
-	})
-	defer m.close()
-	c := newTestClient(m)
-
-	// Removing a non-existent TXT record should return nil.
-	err := c.RemoveTXTRecord(context.Background(), "example.com", "_acme-challenge.example.com", "token123")
-	if err != nil {
-		t.Fatalf("expected nil error for non-existent record, got: %v", err)
-	}
-
-	// No PUT should have been made since nothing to delete.
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	for _, req := range m.requests {
-		if req.Method == http.MethodPut {
-			t.Error("expected no PUT requests when record not found, but found one")
-		}
-	}
-}
-
-func TestAddTXTRecord_TrailingDot(t *testing.T) {
-	m := newMockServer(nil)
-	defer m.close()
-	c := newTestClient(m)
-
-	// Pass name with trailing dot (as cert-manager typically does).
-	err := c.AddTXTRecord(context.Background(), "example.com.", "_acme-challenge.example.com.", "dottoken", 600)
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-
-	m.mu.Lock()
-	defer m.mu.Unlock()
-
-	if len(m.records) != 1 {
-		t.Fatalf("expected 1 record, got %d", len(m.records))
-	}
-	rec := m.records[0]
-	if rec.Type != "TXT" {
-		t.Errorf("expected type TXT, got %s", rec.Type)
-	}
-	if rec.Value != "dottoken" {
-		t.Errorf("expected value dottoken, got %s", rec.Value)
-	}
-}
-
-func TestAddTXTRecord_APIError(t *testing.T) {
-	// Create a server that returns an error status.
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("content-type", "application/json")
-		_ = json.NewEncoder(w).Encode(map[string]any{
-			"status":             500,
-			"status_description": "Internal Server Error",
-			"data": map[string]any{
-				"domain":  "example.com",
-				"records": []any{},
-			},
-		})
-	}))
-	defer srv.Close()
-
-	u, _ := url.Parse(srv.URL + "/api/v2/")
-	c := &Client{
-		provider: &mh.Provider{
-			ApiKey:  "test-api-key",
-			BaseUri: (*mh.ApiBaseUri)(u),
-		},
-		// propagator left nil — error path should never reach propagation.
-	}
-
-	err := c.AddTXTRecord(context.Background(), "example.com", "_acme-challenge.example.com", "token", 300)
-	if err == nil {
-		t.Fatal("expected error from API, got nil")
-	}
-}
-
-func TestAddTXTRecord_ConcurrentPresent(t *testing.T) {
-	// Simulate cert-manager presenting wildcard + bare domain challenges
-	// concurrently. Both must result in two distinct TXT records.
-	m := newMockServer([]dnsRecord{
-		{Type: "A", Name: "example.com.", Value: "1.2.3.4", TTL: 3600},
-	})
-	defer m.close()
-	c := newTestClient(m)
-
-	var wg sync.WaitGroup
-	errs := make([]error, 2)
-
-	wg.Add(2)
-	go func() {
-		defer wg.Done()
-		errs[0] = c.AddTXTRecord(context.Background(), "example.com", "_acme-challenge.example.com", "bare-domain-token", 300)
-	}()
-	go func() {
-		defer wg.Done()
-		errs[1] = c.AddTXTRecord(context.Background(), "example.com", "_acme-challenge.example.com", "wildcard-token", 300)
-	}()
-	wg.Wait()
-
-	for i, err := range errs {
-		if err != nil {
-			t.Fatalf("goroutine %d: unexpected error: %v", i, err)
-		}
-	}
-
-	// Both TXT records must exist alongside the original A record.
-	m.mu.Lock()
-	defer m.mu.Unlock()
-
-	if len(m.records) != 3 {
-		t.Fatalf("expected 3 records (1 A + 2 TXT), got %d: %+v", len(m.records), m.records)
-	}
-
-	values := make(map[string]bool)
-	for _, rec := range m.records {
-		if rec.Type == "TXT" {
-			values[rec.Value] = true
-		}
-	}
-	if !values["bare-domain-token"] {
-		t.Error("missing TXT record for bare-domain-token")
-	}
-	if !values["wildcard-token"] {
-		t.Error("missing TXT record for wildcard-token")
-	}
-}
-
-func TestRemoveTXTRecord_ConcurrentCleanUp(t *testing.T) {
-	// Simulate cert-manager cleaning up both challenges concurrently.
-	// Both TXT records must be removed, A record must remain.
-	m := newMockServer([]dnsRecord{
-		{Type: "A", Name: "example.com.", Value: "1.2.3.4", TTL: 3600},
-		{Type: "TXT", Name: "_acme-challenge.example.com.", Value: "bare-domain-token", TTL: 300},
-		{Type: "TXT", Name: "_acme-challenge.example.com.", Value: "wildcard-token", TTL: 300},
-	})
-	defer m.close()
-	c := newTestClient(m)
-
-	var wg sync.WaitGroup
-	errs := make([]error, 2)
-
-	wg.Add(2)
-	go func() {
-		defer wg.Done()
-		errs[0] = c.RemoveTXTRecord(context.Background(), "example.com", "_acme-challenge.example.com", "bare-domain-token")
-	}()
-	go func() {
-		defer wg.Done()
-		errs[1] = c.RemoveTXTRecord(context.Background(), "example.com", "_acme-challenge.example.com", "wildcard-token")
-	}()
-	wg.Wait()
-
-	for i, err := range errs {
-		if err != nil {
-			t.Fatalf("goroutine %d: unexpected error: %v", i, err)
-		}
-	}
-
-	// Only the A record should remain.
-	m.mu.Lock()
-	defer m.mu.Unlock()
-
-	if len(m.records) != 1 {
-		t.Fatalf("expected 1 record (A only), got %d: %+v", len(m.records), m.records)
-	}
-	if m.records[0].Type != "A" {
-		t.Errorf("expected remaining record to be A, got %s", m.records[0].Type)
-	}
-}
-
-// laggyMockServer simulates the mijn.host API's eventual-consistency window:
-// PUT updates the canonical record set immediately, but the next `lagReads`
-// GET requests return the previous (stale) state before the new state
-// becomes visible. This is the exact failure mode that causes wildcard
-// challenges to clobber each other on the live API.
-type laggyMockServer struct {
-	mu        sync.Mutex
-	records   []dnsRecord
-	stale     []dnsRecord
-	lagReads  int
-	server    *httptest.Server
-	getCount  int
-	putCount  int
-}
-
-func newLaggyMockServer(initial []dnsRecord, lagReads int) *laggyMockServer {
-	m := &laggyMockServer{
-		records:  initial,
-		stale:    append([]dnsRecord(nil), initial...),
-		lagReads: lagReads,
-	}
-	m.server = httptest.NewServer(http.HandlerFunc(m.handler))
-	return m
-}
-
-func (m *laggyMockServer) close() { m.server.Close() }
-
-func (m *laggyMockServer) handler(w http.ResponseWriter, r *http.Request) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	w.Header().Set("content-type", "application/json")
@@ -398,9 +53,9 @@ func (m *laggyMockServer) handler(w http.ResponseWriter, r *http.Request) {
 	case http.MethodGet:
 		m.getCount++
 		view := m.records
-		if m.lagReads > 0 {
+		if m.staleReads > 0 {
 			view = m.stale
-			m.lagReads--
+			m.staleReads--
 		}
 		_ = json.NewEncoder(w).Encode(map[string]any{
 			"status":             200,
@@ -414,11 +69,12 @@ func (m *laggyMockServer) handler(w http.ResponseWriter, r *http.Request) {
 		m.putCount++
 		body, _ := io.ReadAll(r.Body)
 		var payload struct {
-			Records []dnsRecord `json:"records"`
+			Records []DNSRecord `json:"records"`
 		}
 		_ = json.Unmarshal(body, &payload)
 		m.records = payload.Records
-		// stale view sticks until lagReads runs out
+		m.lastPutBody = payload.Records
+		// Stale view sticks at its prior snapshot until staleReads drains.
 		_ = json.NewEncoder(w).Encode(map[string]any{
 			"status":             200,
 			"status_description": "OK",
@@ -428,67 +84,266 @@ func (m *laggyMockServer) handler(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-func newLaggyTestClient(m *laggyMockServer, wait, poll time.Duration) *Client {
-	u, _ := url.Parse(m.server.URL + "/api/v2/")
+func newTestClient(m *mockServer) *Client {
 	return &Client{
-		provider: &mh.Provider{
-			ApiKey:  "test-api-key",
-			BaseUri: (*mh.ApiBaseUri)(u),
+		api: &httpAPI{
+			baseURL: m.server.URL + "/api/v2/",
+			apiKey:  "test-api-key",
+			client:  m.server.Client(),
 		},
-		visibilityWait: wait,
-		visibilityPoll: poll,
+		cache: make(map[string]map[txtKey]int),
 	}
 }
 
-func TestAddTXTRecord_WaitsForAPIVisibility(t *testing.T) {
-	// API returns stale state for the first 2 GETs after the PUT, then
-	// becomes consistent. AddTXTRecord must not return until the new value
-	// is visible to a follow-up GetRecords.
-	m := newLaggyMockServer(nil, 2)
-	defer m.close()
-	c := newLaggyTestClient(m, 5*time.Second, 50*time.Millisecond)
+func hasTXT(records []DNSRecord, name, value string) bool {
+	for _, r := range records {
+		if r.Type == "TXT" && r.Name == name && r.Value == value {
+			return true
+		}
+	}
+	return false
+}
 
-	err := c.AddTXTRecord(context.Background(), "example.com", "_acme-challenge.example.com", "token", 300)
-	if err != nil {
+func TestAddTXTRecord_PUTsRecord(t *testing.T) {
+	m := newMockServer(nil)
+	defer m.close()
+	c := newTestClient(m)
+
+	if err := c.AddTXTRecord(context.Background(), "example.com", "_acme-challenge.example.com", "token", 300); err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
 
-	// Initial GET (idempotency check) + 2 stale GETs + 1 consistent GET = 4 total.
-	if m.getCount < 4 {
-		t.Errorf("expected at least 4 GETs (initial + lag + consistent), got %d", m.getCount)
-	}
 	if m.putCount != 1 {
-		t.Errorf("expected exactly 1 PUT, got %d", m.putCount)
+		t.Fatalf("expected 1 PUT, got %d", m.putCount)
+	}
+	if !hasTXT(m.records, "_acme-challenge.example.com.", "token") {
+		t.Errorf("PUT body did not contain expected TXT record: %+v", m.records)
 	}
 }
 
-func TestAddTXTRecord_VisibilityTimeout(t *testing.T) {
-	// API never reflects the write within the budget. AddTXTRecord must
-	// surface a timeout error so cert-manager retries Present rather than
-	// reporting a phantom success.
-	m := newLaggyMockServer(nil, 1000)
+func TestAddTXTRecord_IdempotentFromCache(t *testing.T) {
+	m := newMockServer(nil)
 	defer m.close()
-	c := newLaggyTestClient(m, 200*time.Millisecond, 30*time.Millisecond)
+	c := newTestClient(m)
 
-	err := c.AddTXTRecord(context.Background(), "example.com", "_acme-challenge.example.com", "token", 300)
-	if err == nil {
-		t.Fatal("expected visibility timeout error, got nil")
+	for i := 0; i < 3; i++ {
+		if err := c.AddTXTRecord(context.Background(), "example.com", "_acme-challenge.example.com", "token", 300); err != nil {
+			t.Fatalf("call %d: %v", i, err)
+		}
 	}
-	if !strings.Contains(err.Error(), "visibility timeout") {
-		t.Errorf("expected visibility timeout in error, got: %v", err)
+
+	if m.putCount != 1 {
+		t.Errorf("expected exactly 1 PUT (cache should suppress repeats), got %d", m.putCount)
 	}
 }
 
-func TestAddTXTRecord_VisibilityWaitDisabledByZero(t *testing.T) {
-	// visibilityWait == 0 disables the wait (used by tests with a strongly-
-	// consistent mock). With a perpetually-laggy server and wait=0, the call
-	// must still succeed because the wait is skipped entirely.
-	m := newLaggyMockServer(nil, 1000)
+func TestAddTXTRecord_PreservesOtherRecords(t *testing.T) {
+	m := newMockServer([]DNSRecord{
+		{Type: "A", Name: "example.com.", Value: "1.2.3.4", TTL: 3600},
+		{Type: "MX", Name: "example.com.", Value: "10 mail.example.com.", TTL: 3600},
+	})
 	defer m.close()
-	c := newLaggyTestClient(m, 0, 0)
+	c := newTestClient(m)
 
-	err := c.AddTXTRecord(context.Background(), "example.com", "_acme-challenge.example.com", "token", 300)
-	if err != nil {
-		t.Fatalf("unexpected error with wait disabled: %v", err)
+	if err := c.AddTXTRecord(context.Background(), "example.com", "_acme-challenge.example.com", "token", 300); err != nil {
+		t.Fatalf("unexpected error: %v", err)
 	}
+
+	if !hasTXT(m.records, "_acme-challenge.example.com.", "token") {
+		t.Error("TXT record missing after PUT")
+	}
+	if !containsRecord(m.records, "A", "example.com.", "1.2.3.4") {
+		t.Error("A record was wiped by PUT")
+	}
+	if !containsRecord(m.records, "MX", "example.com.", "10 mail.example.com.") {
+		t.Error("MX record was wiped by PUT")
+	}
+}
+
+func TestAddTXTRecord_StaleReadDoesNotClobberPriorWrite(t *testing.T) {
+	// The smoking-gun scenario: two challenges write to the same RRset.
+	// After the first write, the API briefly returns the pre-write zone
+	// state. Without the cache, the second write's PUT payload would be
+	// computed from that stale read and would clobber the first record.
+	m := newMockServer(nil)
+	defer m.close()
+	c := newTestClient(m)
+
+	if err := c.AddTXTRecord(context.Background(), "example.com", "_acme-challenge.example.com", "first", 300); err != nil {
+		t.Fatalf("first add: %v", err)
+	}
+
+	// Make the next GET return the pre-write state (no records).
+	m.setStaleReads(1)
+
+	if err := c.AddTXTRecord(context.Background(), "example.com", "_acme-challenge.example.com", "second", 300); err != nil {
+		t.Fatalf("second add: %v", err)
+	}
+
+	if !hasTXT(m.records, "_acme-challenge.example.com.", "first") {
+		t.Error("first TXT was clobbered by stale-read PUT — cache merge failed")
+	}
+	if !hasTXT(m.records, "_acme-challenge.example.com.", "second") {
+		t.Error("second TXT missing from PUT body")
+	}
+}
+
+func TestAddTXTRecord_ConcurrentPresent(t *testing.T) {
+	m := newMockServer([]DNSRecord{
+		{Type: "A", Name: "example.com.", Value: "1.2.3.4", TTL: 3600},
+	})
+	defer m.close()
+	c := newTestClient(m)
+
+	var wg sync.WaitGroup
+	errs := make([]error, 2)
+	wg.Add(2)
+	go func() {
+		defer wg.Done()
+		errs[0] = c.AddTXTRecord(context.Background(), "example.com", "_acme-challenge.example.com", "apex-token", 300)
+	}()
+	go func() {
+		defer wg.Done()
+		errs[1] = c.AddTXTRecord(context.Background(), "example.com", "_acme-challenge.example.com", "wildcard-token", 300)
+	}()
+	wg.Wait()
+
+	for i, err := range errs {
+		if err != nil {
+			t.Fatalf("goroutine %d: %v", i, err)
+		}
+	}
+
+	if !hasTXT(m.records, "_acme-challenge.example.com.", "apex-token") {
+		t.Error("apex token missing from final zone")
+	}
+	if !hasTXT(m.records, "_acme-challenge.example.com.", "wildcard-token") {
+		t.Error("wildcard token missing from final zone")
+	}
+	if !containsRecord(m.records, "A", "example.com.", "1.2.3.4") {
+		t.Error("A record wiped during concurrent writes")
+	}
+}
+
+func TestRemoveTXTRecord_RemovesOnlyMatching(t *testing.T) {
+	m := newMockServer([]DNSRecord{
+		{Type: "TXT", Name: "_acme-challenge.example.com.", Value: "keep", TTL: 300},
+		{Type: "TXT", Name: "_acme-challenge.example.com.", Value: "drop", TTL: 300},
+		{Type: "A", Name: "example.com.", Value: "1.2.3.4", TTL: 3600},
+	})
+	defer m.close()
+	c := newTestClient(m)
+
+	if err := c.RemoveTXTRecord(context.Background(), "example.com", "_acme-challenge.example.com", "drop"); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	if hasTXT(m.records, "_acme-challenge.example.com.", "drop") {
+		t.Error("dropped TXT still present after Remove")
+	}
+	if !hasTXT(m.records, "_acme-challenge.example.com.", "keep") {
+		t.Error("non-matching TXT was incorrectly removed")
+	}
+	if !containsRecord(m.records, "A", "example.com.", "1.2.3.4") {
+		t.Error("A record removed by RemoveTXT")
+	}
+}
+
+func TestRemoveTXTRecord_NoOpWhenAbsent(t *testing.T) {
+	m := newMockServer([]DNSRecord{
+		{Type: "A", Name: "example.com.", Value: "1.2.3.4", TTL: 3600},
+	})
+	defer m.close()
+	c := newTestClient(m)
+
+	if err := c.RemoveTXTRecord(context.Background(), "example.com", "_acme-challenge.example.com", "ghost"); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	if m.putCount != 0 {
+		t.Errorf("expected no PUT for absent record, got %d", m.putCount)
+	}
+}
+
+func TestRemoveTXTRecord_ConcurrentCleanUp(t *testing.T) {
+	m := newMockServer([]DNSRecord{
+		{Type: "A", Name: "example.com.", Value: "1.2.3.4", TTL: 3600},
+		{Type: "TXT", Name: "_acme-challenge.example.com.", Value: "apex-token", TTL: 300},
+		{Type: "TXT", Name: "_acme-challenge.example.com.", Value: "wildcard-token", TTL: 300},
+	})
+	defer m.close()
+	c := newTestClient(m)
+
+	var wg sync.WaitGroup
+	errs := make([]error, 2)
+	wg.Add(2)
+	go func() {
+		defer wg.Done()
+		errs[0] = c.RemoveTXTRecord(context.Background(), "example.com", "_acme-challenge.example.com", "apex-token")
+	}()
+	go func() {
+		defer wg.Done()
+		errs[1] = c.RemoveTXTRecord(context.Background(), "example.com", "_acme-challenge.example.com", "wildcard-token")
+	}()
+	wg.Wait()
+
+	for i, err := range errs {
+		if err != nil {
+			t.Fatalf("goroutine %d: %v", i, err)
+		}
+	}
+
+	if hasTXT(m.records, "_acme-challenge.example.com.", "apex-token") {
+		t.Error("apex token not removed")
+	}
+	if hasTXT(m.records, "_acme-challenge.example.com.", "wildcard-token") {
+		t.Error("wildcard token not removed")
+	}
+	if !containsRecord(m.records, "A", "example.com.", "1.2.3.4") {
+		t.Error("A record wiped during cleanup")
+	}
+}
+
+func TestAddTXTRecord_TrailingDotNormalization(t *testing.T) {
+	m := newMockServer(nil)
+	defer m.close()
+	c := newTestClient(m)
+
+	if err := c.AddTXTRecord(context.Background(), "example.com.", "_acme-challenge.example.com.", "token", 300); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	if !hasTXT(m.records, "_acme-challenge.example.com.", "token") {
+		t.Errorf("name normalization failed: %+v", m.records)
+	}
+}
+
+func TestAddTXTRecord_APIError(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("content-type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"status":             500,
+			"status_description": "Internal Server Error",
+			"data":               map[string]any{"domain": "example.com", "records": []any{}},
+		})
+	}))
+	defer srv.Close()
+
+	c := &Client{
+		api:   &httpAPI{baseURL: srv.URL + "/api/v2/", apiKey: "k", client: srv.Client()},
+		cache: make(map[string]map[txtKey]int),
+	}
+
+	if err := c.AddTXTRecord(context.Background(), "example.com", "_acme-challenge.example.com", "token", 300); err == nil {
+		t.Fatal("expected API error, got nil")
+	}
+}
+
+func containsRecord(records []DNSRecord, recType, name, value string) bool {
+	for _, r := range records {
+		if r.Type == recType && r.Name == name && r.Value == value {
+			return true
+		}
+	}
+	return false
 }

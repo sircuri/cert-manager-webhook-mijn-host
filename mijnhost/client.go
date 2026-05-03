@@ -2,173 +2,215 @@ package mijnhost
 
 import (
 	"context"
-	"fmt"
 	"strings"
 	"sync"
-	"time"
-
-	"github.com/libdns/libdns"
-	"github.com/libdns/mijnhost"
 )
 
-// defaultVisibilityWait caps how long AddTXTRecord blocks waiting for the
-// mijn.host API's read view to catch up with a write we just performed.
-// Kept well under the typical kube-apiserver request timeout so the webhook
-// call itself does not time out.
-const defaultVisibilityWait = 30 * time.Second
+// txtKey identifies a TXT record in our cache. Multiple values can coexist
+// at the same name, which is required for wildcard certs (apex + wildcard
+// challenges share _acme-challenge.<zone>).
+type txtKey struct {
+	name  string // absolute, with trailing dot, as the API stores it
+	value string
+}
 
-// defaultVisibilityPoll is the interval between GetRecords retries while
-// waiting for the API to reflect the just-written record.
-const defaultVisibilityPoll = 1500 * time.Millisecond
+// recordID is the dedup key when merging records (type+name+value).
+type recordID struct {
+	Type, Name, Value string
+}
 
-// Client wraps the libdns/mijnhost Provider to expose DNS operations needed
-// by the cert-manager webhook solver. A single Client instance must be reused
-// across requests so that the mutex serializes concurrent read-modify-write
-// operations against the mijn.host full-zone PUT API.
+// Client manages TXT records on mijn.host zones for cert-manager DNS-01
+// challenges.
+//
+// The mijn.host API is full-zone PUT and read-after-write inconsistent:
+// a GET shortly after a PUT can return the pre-write zone state, even
+// from the same caller. The libdns/mijnhost provider's Get-Modify-PUT
+// helpers turn that into a real race for wildcard certs, where apex
+// and wildcard challenges write to the same _acme-challenge.<zone>
+// RRset; a stale GET inside the second writer's AppendRecords causes
+// the PUT payload to omit (and therefore delete) the first writer's
+// record.
+//
+// To make writes deterministic regardless of API read consistency,
+// Client maintains an in-memory authoritative cache of TXT records
+// it has added. Every PUT merges the API's current zone state with
+// this cache, so a stale GET cannot lose records this Client already
+// wrote. The mutex serializes operations on a single Client, which is
+// shared across all challenges via the solver.
 type Client struct {
-	mu       sync.Mutex
-	provider *mijnhost.Provider
+	api *httpAPI
 
-	// visibilityWait caps how long AddTXTRecord blocks after a successful
-	// AppendRecords waiting for the mijn.host API to return the new record
-	// on a follow-up GetRecords. Closes the read-after-write window of the
-	// mijn.host backend so the next Present (e.g. the second challenge of a
-	// wildcard order) sees the first challenge's record and appends to it
-	// instead of overwriting it via the full-zone PUT.
-	//
-	// Zero disables the wait (used by tests with a strongly-consistent mock).
-	visibilityWait time.Duration
-	visibilityPoll time.Duration
+	mu sync.Mutex
+	// cache: zone -> our TXT records (key=(absName,value)) -> ttl.
+	// Cache is the source of truth for records this Client wrote, and
+	// is unioned into every PUT payload to compensate for API stale reads.
+	cache map[string]map[txtKey]int
 }
 
 // NewClient creates a new mijn.host DNS client with the given API key.
+// A single Client must be reused across requests so the mutex serializes
+// concurrent writes and the cache survives between calls.
 func NewClient(apiKey string) *Client {
 	return &Client{
-		provider: &mijnhost.Provider{
-			ApiKey: apiKey,
-		},
-		visibilityWait: defaultVisibilityWait,
-		visibilityPoll: defaultVisibilityPoll,
+		api:   newHTTPAPI(apiKey),
+		cache: make(map[string]map[txtKey]int),
 	}
 }
 
-// AddTXTRecord adds a TXT record to the given zone. The operation is
-// serialized by the client mutex to prevent concurrent read-modify-write
-// races on the mijn.host full-zone PUT API. It is idempotent: if a matching
-// record already exists, no PUT is issued. After a write, the call blocks
-// (still under the mutex) until the API reflects the new record, so any
-// subsequent caller observes the up-to-date zone state.
-func (c *Client) AddTXTRecord(ctx context.Context, zone string, name string, value string, ttl int) error {
-	relName := toRelativeName(name, zone)
+// AddTXTRecord adds a TXT record to the given zone.
+//
+// Idempotent: if the record is already in our cache, no API calls happen.
+// Otherwise: GET the zone, union the API view with our cache (cache wins
+// for our records, API contributes everything else), append the new
+// record, PUT the merged set, then update the cache. The cache merge is
+// what defends against the API's stale read view.
+func (c *Client) AddTXTRecord(ctx context.Context, zone, name, value string, ttl int) error {
+	zone = strings.TrimSuffix(zone, ".")
+	absName := absoluteName(name, zone)
+	key := txtKey{name: absName, value: value}
 
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
-	existing, err := c.provider.GetRecords(ctx, zone)
-	if err != nil {
-		return err
-	}
-	for _, rec := range existing {
-		rr := rec.RR()
-		if rr.Type == "TXT" && rr.Name == relName && rr.Data == value {
+	if zc := c.cache[zone]; zc != nil {
+		if _, ok := zc[key]; ok {
 			return nil
 		}
 	}
 
-	_, err = c.provider.AppendRecords(ctx, zone, []libdns.Record{
-		libdns.TXT{
-			Name: relName,
-			TTL:  time.Duration(ttl) * time.Second,
-			Text: value,
-		},
-	})
+	apiRecords, err := c.api.getRecords(ctx, zone)
 	if err != nil {
 		return err
 	}
 
-	return c.waitForVisibility(ctx, zone, relName, value)
+	desired := mergeRecords(apiRecords, c.cache[zone])
+	desired = appendIfMissing(desired, DNSRecord{
+		Type:  "TXT",
+		Name:  absName,
+		Value: value,
+		TTL:   ttl,
+	})
+
+	if err := c.api.putRecords(ctx, zone, desired); err != nil {
+		return err
+	}
+
+	if c.cache[zone] == nil {
+		c.cache[zone] = make(map[txtKey]int)
+	}
+	c.cache[zone][key] = ttl
+	return nil
 }
 
-// RemoveTXTRecord removes a TXT record from the given zone. The operation is
-// serialized by the client mutex to prevent concurrent read-modify-write
-// races. It is idempotent: if the record does not exist, it returns nil.
-func (c *Client) RemoveTXTRecord(ctx context.Context, zone string, name string, value string) error {
-	relName := toRelativeName(name, zone)
+// RemoveTXTRecord removes a TXT record from the given zone.
+//
+// Idempotent: if the record is neither in the API response nor our cache,
+// returns nil without issuing a PUT. Otherwise: GET, merge with cache,
+// drop the record, PUT, update cache.
+func (c *Client) RemoveTXTRecord(ctx context.Context, zone, name, value string) error {
+	zone = strings.TrimSuffix(zone, ".")
+	absName := absoluteName(name, zone)
+	key := txtKey{name: absName, value: value}
 
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
-	existing, err := c.provider.GetRecords(ctx, zone)
+	apiRecords, err := c.api.getRecords(ctx, zone)
 	if err != nil {
 		return err
 	}
 
-	var toDelete []libdns.Record
-	for _, rec := range existing {
-		rr := rec.RR()
-		if rr.Type == "TXT" && rr.Name == relName && rr.Data == value {
-			toDelete = append(toDelete, rec)
+	inCache := false
+	if zc := c.cache[zone]; zc != nil {
+		_, inCache = zc[key]
+	}
+	inAPI := false
+	for _, r := range apiRecords {
+		if r.Type == "TXT" && r.Name == absName && r.Value == value {
+			inAPI = true
+			break
 		}
 	}
-
-	if len(toDelete) == 0 {
+	if !inCache && !inAPI {
 		return nil
 	}
 
-	_, err = c.provider.DeleteRecords(ctx, zone, toDelete)
-	return err
-}
+	desired := mergeRecords(apiRecords, c.cache[zone])
+	desired = removeRecord(desired, "TXT", absName, value)
 
-// waitForVisibility polls provider.GetRecords until the (relName, value) TXT
-// record appears in the API response, or visibilityWait elapses. This
-// guarantees that the next caller's Get-Modify-PUT (libdns AppendRecords)
-// sees the record we just wrote, so it appends to it instead of clobbering it.
-func (c *Client) waitForVisibility(ctx context.Context, zone, relName, value string) error {
-	if c.visibilityWait <= 0 {
-		return nil
+	if err := c.api.putRecords(ctx, zone, desired); err != nil {
+		return err
 	}
 
-	deadline := time.Now().Add(c.visibilityWait)
-	var lastErr error
-
-	for {
-		recs, err := c.provider.GetRecords(ctx, zone)
-		if err == nil {
-			for _, rec := range recs {
-				rr := rec.RR()
-				if rr.Type == "TXT" && rr.Name == relName && rr.Data == value {
-					return nil
-				}
-			}
-		} else {
-			lastErr = err
-		}
-
-		if time.Now().After(deadline) {
-			if lastErr != nil {
-				return fmt.Errorf("API visibility timeout for %s after %s (last GetRecords error: %w)",
-					relName, c.visibilityWait, lastErr)
-			}
-			return fmt.Errorf("API visibility timeout: %s value not visible after %s", relName, c.visibilityWait)
-		}
-
-		select {
-		case <-ctx.Done():
-			return ctx.Err()
-		case <-time.After(c.visibilityPoll):
-		}
+	if c.cache[zone] != nil {
+		delete(c.cache[zone], key)
 	}
+	return nil
 }
 
-// toRelativeName strips the zone suffix and any trailing dots from a record name
-// to produce a name relative to the zone (as libdns expects).
-func toRelativeName(name, zone string) string {
+// mergeRecords returns the union of API records and cached TXT records,
+// deduped by (type, name, value). Cached records win on TTL when the
+// dedup key matches.
+func mergeRecords(api []DNSRecord, cache map[txtKey]int) []DNSRecord {
+	out := make([]DNSRecord, 0, len(api)+len(cache))
+	seen := make(map[recordID]bool, len(api)+len(cache))
+
+	for k, ttl := range cache {
+		id := recordID{Type: "TXT", Name: k.name, Value: k.value}
+		seen[id] = true
+		out = append(out, DNSRecord{
+			Type:  "TXT",
+			Name:  k.name,
+			Value: k.value,
+			TTL:   ttl,
+		})
+	}
+	for _, r := range api {
+		id := recordID{Type: r.Type, Name: r.Name, Value: r.Value}
+		if seen[id] {
+			continue
+		}
+		seen[id] = true
+		out = append(out, r)
+	}
+	return out
+}
+
+// appendIfMissing adds r to records if no entry with the same
+// (type, name, value) is already present.
+func appendIfMissing(records []DNSRecord, r DNSRecord) []DNSRecord {
+	for _, existing := range records {
+		if existing.Type == r.Type && existing.Name == r.Name && existing.Value == r.Value {
+			return records
+		}
+	}
+	return append(records, r)
+}
+
+// removeRecord returns records with any entry matching (type, name, value)
+// removed.
+func removeRecord(records []DNSRecord, recType, name, value string) []DNSRecord {
+	out := records[:0]
+	for _, r := range records {
+		if r.Type == recType && r.Name == name && r.Value == value {
+			continue
+		}
+		out = append(out, r)
+	}
+	return out
+}
+
+// absoluteName returns the FQDN form (with trailing dot) of name relative
+// to zone, matching how the mijn.host API stores names. zone may be passed
+// with or without a trailing dot; name may already be relative or absolute.
+func absoluteName(name, zone string) string {
 	name = strings.TrimSuffix(name, ".")
 	zone = strings.TrimSuffix(zone, ".")
-
-	rel := strings.TrimSuffix(name, "."+zone)
-	if rel == zone {
-		return "@"
+	if name == "" || name == "@" {
+		return zone + "."
 	}
-	return rel
+	if name == zone || strings.HasSuffix(name, "."+zone) {
+		return name + "."
+	}
+	return name + "." + zone + "."
 }
