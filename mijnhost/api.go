@@ -66,7 +66,7 @@ func (a *httpAPI) getRecords(ctx context.Context, zone string) ([]DNSRecord, err
 	if err := a.do(ctx, http.MethodGet, a.dnsPath(zone), nil, &resp); err != nil {
 		return nil, err
 	}
-	if err := resp.apiStatus.err(); err != nil {
+	if err := resp.err(); err != nil {
 		return nil, err
 	}
 	return resp.Data.Records, nil
@@ -115,7 +115,7 @@ func (a *httpAPI) do(ctx context.Context, method, path string, body io.Reader, o
 	if err != nil {
 		return err
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	if !strings.HasPrefix(resp.Header.Get("content-type"), "application/json") {
 		return fmt.Errorf("mijn.host API returned non-JSON response (status %d)", resp.StatusCode)
