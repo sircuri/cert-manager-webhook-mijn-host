@@ -3,12 +3,14 @@ package mijnhost
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
 	"sync"
 	"testing"
+	"time"
 
 	mh "github.com/libdns/mijnhost"
 )
@@ -91,7 +93,8 @@ func (m *mockServer) close() {
 	m.server.Close()
 }
 
-// newTestClient creates a Client backed by the mock server.
+// newTestClient creates a Client backed by the mock server. The propagator
+// is left nil so AddTXTRecord does not attempt real DNS lookups during tests.
 func newTestClient(m *mockServer) *Client {
 	u, _ := url.Parse(m.server.URL + "/api/v2/")
 	return &Client{
@@ -256,6 +259,7 @@ func TestAddTXTRecord_APIError(t *testing.T) {
 			ApiKey:  "test-api-key",
 			BaseUri: (*mh.ApiBaseUri)(u),
 		},
+		// propagator left nil — error path should never reach propagation.
 	}
 
 	err := c.AddTXTRecord(context.Background(), "example.com", "_acme-challenge.example.com", "token", 300)
@@ -355,5 +359,85 @@ func TestRemoveTXTRecord_ConcurrentCleanUp(t *testing.T) {
 	}
 	if m.records[0].Type != "A" {
 		t.Errorf("expected remaining record to be A, got %s", m.records[0].Type)
+	}
+}
+
+// fakePropagator records calls and can return a configured error.
+type fakePropagator struct {
+	mu    sync.Mutex
+	calls []propCall
+	err   error
+}
+
+type propCall struct {
+	zone, fqdn, value string
+}
+
+func (f *fakePropagator) WaitForTXT(_ context.Context, zone, fqdn, value string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.calls = append(f.calls, propCall{zone, fqdn, value})
+	return f.err
+}
+
+func TestAddTXTRecord_WaitsForPropagation(t *testing.T) {
+	m := newMockServer(nil)
+	defer m.close()
+	c := newTestClient(m)
+	prop := &fakePropagator{}
+	c.propagator = prop
+	c.propagationWait = 5 * time.Second
+
+	err := c.AddTXTRecord(context.Background(), "example.com", "_acme-challenge.example.com", "token", 300)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	if len(prop.calls) != 1 {
+		t.Fatalf("expected 1 propagation call, got %d", len(prop.calls))
+	}
+	got := prop.calls[0]
+	if got.zone != "example.com" || got.fqdn != "_acme-challenge.example.com" || got.value != "token" {
+		t.Errorf("unexpected propagation call: %+v", got)
+	}
+}
+
+func TestAddTXTRecord_PropagationOnIdempotentPath(t *testing.T) {
+	// Record already present in the zone — no PUT, but propagation must
+	// still be verified so we don't return success while the existing
+	// record is still propagating across mijn.host edge nodes.
+	m := newMockServer([]dnsRecord{
+		{Type: "TXT", Name: "_acme-challenge.example.com.", Value: "token", TTL: 300},
+	})
+	defer m.close()
+	c := newTestClient(m)
+	prop := &fakePropagator{}
+	c.propagator = prop
+	c.propagationWait = 5 * time.Second
+
+	err := c.AddTXTRecord(context.Background(), "example.com", "_acme-challenge.example.com", "token", 300)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	if len(prop.calls) != 1 {
+		t.Fatalf("expected 1 propagation call on idempotent path, got %d", len(prop.calls))
+	}
+}
+
+func TestAddTXTRecord_PropagationErrorPropagates(t *testing.T) {
+	m := newMockServer(nil)
+	defer m.close()
+	c := newTestClient(m)
+	propErr := errors.New("propagation timeout")
+	c.propagator = &fakePropagator{err: propErr}
+	c.propagationWait = 5 * time.Second
+
+	err := c.AddTXTRecord(context.Background(), "example.com", "_acme-challenge.example.com", "token", 300)
+	if err == nil {
+		t.Fatal("expected propagation error to be returned")
+	}
+	if !errors.Is(err, propErr) {
+		t.Errorf("expected wrapped propagation error, got: %v", err)
 	}
 }
