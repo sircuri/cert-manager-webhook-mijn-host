@@ -19,7 +19,40 @@ certManager:
 
 secretName: mijn-host-api-key
 
-replicaCount: 1
+# The webhook is an aggregated apiserver. When its only pod is gone, the
+# v1alpha1.<groupName> APIService goes Unavailable and breaks cluster-wide API
+# discovery (helm reports "cluster unreachable"). Run at least 2 replicas.
+replicaCount: 2
+
+# PodDisruptionBudget keeps a replica up during voluntary disruptions
+# (node drain, autoscaler scale-down) so the APIService never fully drops.
+podDisruptionBudget:
+  enabled: true
+  minAvailable: 1
+
+# Spread replicas across nodes so a single node loss cannot take down the whole
+# APIService. Soft (ScheduleAnyway) so single-node clusters still schedule.
+topologySpreadConstraints:
+  - maxSkew: 1
+    topologyKey: kubernetes.io/hostname
+    whenUnsatisfiable: ScheduleAnyway
+    labelSelector:
+      matchLabels:
+        app.kubernetes.io/name: mijn-host-webhook
+
+# Probe tuning. Liveness hits /livez (excludes poststart hooks) so slow init
+# never triggers a restart; readiness hits /readyz (includes poststart hooks)
+# so the pod only joins the Service once fully ready. failureThreshold on
+# liveness tolerates transient blips before restarting.
+livenessProbe:
+  initialDelaySeconds: 15
+  periodSeconds: 10
+  timeoutSeconds: 3
+  failureThreshold: 6
+readinessProbe:
+  periodSeconds: 5
+  timeoutSeconds: 3
+  failureThreshold: 2
 
 resources: {}
 
