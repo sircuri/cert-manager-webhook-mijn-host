@@ -27,6 +27,70 @@ subjects:
     name: {{ include "mijn-host-webhook.serviceAccountName" . }}
     namespace: {{ .Release.Namespace }}
 ---
+# Zone coordination: one Lease (lock) and one ConfigMap (desired challenge
+# records) per DNS zone, in the release namespace. This is what serializes
+# writes across replicas and lets the sweep clean up leftovers.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: {{ include "mijn-host-webhook.fullname" . }}:zone-state
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "mijn-host-webhook.labels" . | nindent 4 }}
+rules:
+  - apiGroups: ["coordination.k8s.io"]
+    resources: ["leases"]
+    verbs: ["get", "create", "update"]
+  - apiGroups: [""]
+    resources: ["configmaps"]
+    verbs: ["get", "list", "create", "update"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: {{ include "mijn-host-webhook.fullname" . }}:zone-state
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "mijn-host-webhook.labels" . | nindent 4 }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: {{ include "mijn-host-webhook.fullname" . }}:zone-state
+subjects:
+  - kind: ServiceAccount
+    name: {{ include "mijn-host-webhook.serviceAccountName" . }}
+    namespace: {{ .Release.Namespace }}
+{{- if .Values.triggerContext.enabled }}
+---
+# Read-only access to cert-manager Challenges and Orders so the logs can name
+# the Certificate behind each request.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: {{ include "mijn-host-webhook.fullname" . }}:trigger-context
+  labels:
+    {{- include "mijn-host-webhook.labels" . | nindent 4 }}
+rules:
+  - apiGroups: ["acme.cert-manager.io"]
+    resources: ["challenges", "orders"]
+    verbs: ["get", "list"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: {{ include "mijn-host-webhook.fullname" . }}:trigger-context
+  labels:
+    {{- include "mijn-host-webhook.labels" . | nindent 4 }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: {{ include "mijn-host-webhook.fullname" . }}:trigger-context
+subjects:
+  - kind: ServiceAccount
+    name: {{ include "mijn-host-webhook.serviceAccountName" . }}
+    namespace: {{ .Release.Namespace }}
+{{- end }}
+---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRole
 metadata:
