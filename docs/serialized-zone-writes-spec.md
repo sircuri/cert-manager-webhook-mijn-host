@@ -131,14 +131,18 @@ API write. The reconcile reads the serial before the GET and again just
 before the PUT. If it moved, the upload was built from an outdated copy and
 the attempt starts over with a fresh GET, up to `MaxWriteAttempts` (5); then
 the request fails with `ErrZoneChanging` and cert-manager retries later. The
-webhook never writes over a change it has observed. After its own PUT it
-waits up to 15 s for the serial to advance, logging either way. If no
-nameserver answers, the check is skipped and the write proceeds (chart value
+webhook never writes over a change it has observed. If no nameserver
+answers, the check is skipped and the write proceeds (chart value
 `zone.serialCheck`: `best-effort`, `required`, `off`). Limits: the serial has
 one-second resolution, and the check is not a true compare-and-swap; the
 unprotected window is the few milliseconds between the last serial read and
-the PUT. Deliberately not stored across operations: the webhook must keep
-working through external DNS edits, which are normal.
+the PUT. Measured on 2026-09-12: mijn.host stamps the serial with the PUT
+time but its nameservers served the new serial 54 s later, so the zone is
+published in batches roughly a minute after a write. Hence there is no wait
+for the serial after our own PUT (it would exceed the request budget), and
+an external edit made in the minute before our read can still be published
+after our write. Deliberately not stored across operations: the webhook must
+keep working through external DNS edits, which are normal.
 
 Chart option `ownAcmeRecords` (default `true`) enables dropping challenge
 records the webhook does not know. With `false`, unknown challenge records

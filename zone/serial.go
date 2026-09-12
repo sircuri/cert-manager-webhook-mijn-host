@@ -9,7 +9,6 @@ import (
 	"sync"
 	"time"
 
-	"github.com/go-logr/logr"
 	"github.com/miekg/dns"
 )
 
@@ -127,26 +126,4 @@ func (r *DNSSerialReader) nameservers(ctx context.Context, zone string) ([]strin
 	r.nsCache[zone] = servers
 	r.nsCacheAt[zone] = r.now()
 	return servers, nil
-}
-
-// waitForSerialAdvance polls until the zone serial is greater than prev or
-// the budget runs out. It only logs; a write is never failed because of it.
-func waitForSerialAdvance(ctx context.Context, log logr.Logger, reader SerialReader, zone string, prev uint32, budget, interval time.Duration) {
-	deadline := time.Now().Add(budget)
-	for {
-		serial, err := reader.Serial(ctx, zone)
-		if err == nil && serial > prev {
-			log.Info("zone serial advanced after write", "serial", serial, "previous", prev)
-			return
-		}
-		if time.Now().After(deadline) {
-			log.Info("zone serial did not advance after write within budget", "previous", prev, "budget", budget)
-			return
-		}
-		select {
-		case <-ctx.Done():
-			return
-		case <-time.After(interval):
-		}
-	}
 }

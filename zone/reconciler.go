@@ -45,10 +45,6 @@ type Options struct {
 	// MaxWriteAttempts bounds how often a write is restarted because the
 	// zone changed between read and write. Default 5.
 	MaxWriteAttempts int
-	// SerialWaitBudget and SerialWaitInterval tune the wait for the serial
-	// to advance after our own write. Defaults 15s and 1s.
-	SerialWaitBudget   time.Duration
-	SerialWaitInterval time.Duration
 	// Now overrides the clock, for tests.
 	Now func() time.Time
 }
@@ -148,7 +144,11 @@ func (r *Reconciler) Sweep(ctx context.Context) error {
 // taken from the stored state otherwise (sweep).
 func (r *Reconciler) reconcile(ctx context.Context, op, zone string, secretRef *SecretRef, mutate func(*State) []Key) error {
 	zone = strings.TrimSuffix(zone, ".")
-	log := logr.FromContextOrDiscard(ctx).WithValues("op", op, "zone", zone)
+	log := logr.FromContextOrDiscard(ctx).WithValues("op", op)
+	if op == "sweep" {
+		// Requests already carry the zone from the solver; sweeps do not.
+		log = log.WithValues("zone", zone)
+	}
 	ctx = logr.NewContext(ctx, log)
 
 	release, err := r.lock.Acquire(ctx, zone)
@@ -222,13 +222,11 @@ func (r *Reconciler) reconcile(ctx context.Context, op, zone string, secretRef *
 
 		log.Info("zone write", "attempt", attempt, "add", Describe(diff.Add), "remove", Describe(diff.Remove),
 			"keep", diff.Kept, "total", len(payload), "serial", before)
-		if err := api.PutRecords(ctx, zone, payload); err != nil {
-			return err
-		}
-		if checkable {
-			waitForSerialAdvance(ctx, log, r.opts.Serial, zone, before, r.serialWaitBudget(), r.serialWaitInterval())
-		}
-		return nil
+		// No wait for the serial to advance after our own write: mijn.host
+		// publishes the zone about a minute after a PUT, far beyond the
+		// request budget. The next operation on the zone sees the serial
+		// move between its read and write at worst once and simply re-reads.
+		return api.PutRecords(ctx, zone, payload)
 	}
 	log.Error(ErrZoneChanging, "giving up for now, cert-manager will retry", "attempts", r.opts.MaxWriteAttempts)
 	return fmt.Errorf("zone %s: %w", zone, ErrZoneChanging)
@@ -247,20 +245,6 @@ func (r *Reconciler) readSerial(ctx context.Context, zone, when string) (uint32,
 		return 0, false
 	}
 	return serial, true
-}
-
-func (r *Reconciler) serialWaitBudget() time.Duration {
-	if r.opts.SerialWaitBudget > 0 {
-		return r.opts.SerialWaitBudget
-	}
-	return 15 * time.Second
-}
-
-func (r *Reconciler) serialWaitInterval() time.Duration {
-	if r.opts.SerialWaitInterval > 0 {
-		return r.opts.SerialWaitInterval
-	}
-	return time.Second
 }
 
 func (r *Reconciler) dropExpired(st *State) []mijnhost.DNSRecord {

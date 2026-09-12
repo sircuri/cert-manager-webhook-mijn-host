@@ -41,34 +41,32 @@ func newSerialEnv(t *testing.T, script []uint32, required bool, initial ...mijnh
 	t.Helper()
 	ss := &scriptedSerial{script: script}
 	e := newTestEnvWith(t, Options{
-		OwnAcmeRecords:     true,
-		Serial:             ss,
-		SerialRequired:     required,
-		MaxWriteAttempts:   3,
-		SerialWaitBudget:   20 * time.Millisecond,
-		SerialWaitInterval: time.Millisecond,
+		OwnAcmeRecords:   true,
+		Serial:           ss,
+		SerialRequired:   required,
+		MaxWriteAttempts: 3,
 	}, initial...)
 	return e, ss
 }
 
 func TestSerialCheck_UnchangedSerialWrites(t *testing.T) {
-	// before read: 10, before write: 10, after write: 11 (advanced).
-	e, ss := newSerialEnv(t, []uint32{10, 10, 11}, false, recA)
+	// before read: 10, before write: 10 -> write.
+	e, ss := newSerialEnv(t, []uint32{10, 10}, false, recA)
 	if err := e.rec.Present(context.Background(), request("_acme-challenge.example.nl", "aaa")); err != nil {
 		t.Fatal(err)
 	}
 	if e.dns.puts != 1 || !e.dns.has(testZone, chalA) {
 		t.Fatalf("puts=%d zone=%v", e.dns.puts, e.dns.challenges(testZone))
 	}
-	if ss.calls != 3 {
-		t.Fatalf("expected 3 serial reads (before read, before write, after write), got %d", ss.calls)
+	if ss.calls != 2 {
+		t.Fatalf("expected 2 serial reads (before read, before write), got %d", ss.calls)
 	}
 }
 
 func TestSerialCheck_ChangedSerialStartsOver(t *testing.T) {
 	// Attempt 1: read at 10, someone edits, before write it is 11 -> restart.
-	// Attempt 2: read at 11, before write 11 -> write, then 12.
-	e, ss := newSerialEnv(t, []uint32{10, 11, 11, 11, 12}, false, recA)
+	// Attempt 2: read at 11, before write 11 -> write.
+	e, ss := newSerialEnv(t, []uint32{10, 11, 11, 11}, false, recA)
 	if err := e.rec.Present(context.Background(), request("_acme-challenge.example.nl", "aaa")); err != nil {
 		t.Fatal(err)
 	}
@@ -78,8 +76,8 @@ func TestSerialCheck_ChangedSerialStartsOver(t *testing.T) {
 	if e.dns.puts != 1 || !e.dns.has(testZone, chalA) {
 		t.Fatalf("puts=%d zone=%v", e.dns.puts, e.dns.challenges(testZone))
 	}
-	if ss.calls < 5 {
-		t.Fatalf("serial reads = %d", ss.calls)
+	if ss.calls != 4 {
+		t.Fatalf("serial reads = %d, want 4", ss.calls)
 	}
 }
 
@@ -97,7 +95,7 @@ func TestSerialCheck_ConstantlyChangingZoneGivesUpWithoutWriting(t *testing.T) {
 		t.Fatalf("expected 3 attempts, gets=%d", e.dns.gets)
 	}
 	// The intent is kept: once the zone settles, the sweep writes it.
-	e.rec.opts.Serial = &scriptedSerial{script: []uint32{9, 9, 10}}
+	e.rec.opts.Serial = &scriptedSerial{script: []uint32{9, 9}}
 	if err := e.rec.Sweep(context.Background()); err != nil {
 		t.Fatal(err)
 	}
@@ -136,16 +134,6 @@ func TestSerialCheck_NoSerialReadsWhenNothingToWrite(t *testing.T) {
 	}
 	if e.dns.puts != 0 || ss.calls != 1 {
 		t.Fatalf("puts=%d serialReads=%d", e.dns.puts, ss.calls)
-	}
-}
-
-func TestSerialCheck_SerialNotAdvancingAfterWriteIsOnlyLogged(t *testing.T) {
-	e, _ := newSerialEnv(t, []uint32{10, 10, 10}, false, recA)
-	if err := e.rec.Present(context.Background(), request("_acme-challenge.example.nl", "aaa")); err != nil {
-		t.Fatalf("a serial that does not advance must not fail the write: %v", err)
-	}
-	if e.dns.puts != 1 {
-		t.Fatalf("puts=%d", e.dns.puts)
 	}
 }
 
