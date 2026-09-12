@@ -152,3 +152,69 @@ func TestObjectName(t *testing.T) {
 		t.Errorf("got %q", got)
 	}
 }
+
+// TestComputePayload_NeverTouchesNonChallengeRecords is the safety property
+// the whole design rests on: every record that is not a TXT record under
+// _acme-challenge. comes out of ComputePayload exactly as it went in, in the
+// same order, whatever the desired list, removals and ownership mode are.
+func TestComputePayload_NeverTouchesNonChallengeRecords(t *testing.T) {
+	foreign := []mijnhost.DNSRecord{
+		{Type: "A", Name: "example.nl.", Value: "1.2.3.4", TTL: 900},
+		{Type: "AAAA", Name: "example.nl.", Value: "2001:db8::1", TTL: 900},
+		{Type: "MX", Name: "example.nl.", Value: "10 mx1.mijn.host.", TTL: 900},
+		{Type: "MX", Name: "example.nl.", Value: "20 mx2.mijn.host.", TTL: 900},
+		{Type: "TXT", Name: "example.nl.", Value: "v=spf1 include:spf.mijn.host ~all", TTL: 300},
+		{Type: "TXT", Name: "_dmarc.example.nl.", Value: "v=DMARC1; p=quarantine;", TTL: 900},
+		{Type: "TXT", Name: "x._domainkey.example.nl.", Value: "v=DKIM1; k=rsa; p=MIIB", TTL: 900},
+		{Type: "TXT", Name: "acme-challenge.example.nl.", Value: "no underscore, not ours", TTL: 60},
+		{Type: "TXT", Name: "_acme-challenge", Value: "no trailing dot after label, not ours", TTL: 60},
+		{Type: "TXT", Name: "sub._acme-challenge.example.nl.", Value: "prefix elsewhere, not ours", TTL: 60},
+		{Type: "CNAME", Name: "_acme-challenge.example.nl.", Value: "delegated.example.org.", TTL: 60},
+		{Type: "CNAME", Name: "www.example.nl.", Value: "example.nl.", TTL: 900},
+		{Type: "SRV", Name: "_sip._tcp.example.nl.", Value: "10 60 5060 sip.example.nl.", TTL: 900},
+		{Type: "CAA", Name: "example.nl.", Value: "0 issue \"letsencrypt.org\"", TTL: 900},
+		{Type: "NS", Name: "sub.example.nl.", Value: "ns1.example.org.", TTL: 3600},
+		{Type: "TXT", Name: "", Value: "empty name", TTL: 1},
+		{Type: "", Name: "_acme-challenge.example.nl.", Value: "empty type", TTL: 1},
+	}
+	// Interleave challenge records so ordering of the pass-through is tested.
+	api := []mijnhost.DNSRecord{}
+	for i, r := range foreign {
+		api = append(api, r)
+		if i%3 == 0 {
+			api = append(api, txt("_acme-challenge.example.nl.", "chal-"+r.Type+r.Name))
+		}
+	}
+
+	scenarios := []struct {
+		name    string
+		desired []mijnhost.DNSRecord
+		remove  []Key
+		ownAll  bool
+	}{
+		{"own, nothing desired", nil, nil, true},
+		{"own, some desired", []mijnhost.DNSRecord{chalA, chalB}, nil, true},
+		{"not own, nothing desired", nil, nil, false},
+		{"not own, desired and explicit removes", []mijnhost.DNSRecord{chalA}, []Key{{chalOld.Name, chalOld.Value}, {"example.nl.", "v=spf1 include:spf.mijn.host ~all"}}, false},
+		{"own, remove list naming a foreign record must be ignored", nil, []Key{{"example.nl.", "1.2.3.4"}, {"_dmarc.example.nl.", "v=DMARC1; p=quarantine;"}}, true},
+	}
+	for _, sc := range scenarios {
+		t.Run(sc.name, func(t *testing.T) {
+			payload, _ := ComputePayload(api, sc.desired, sc.remove, sc.ownAll)
+			var got []mijnhost.DNSRecord
+			for _, r := range payload {
+				if !IsChallengeRecord(r) {
+					got = append(got, r)
+				}
+			}
+			if len(got) != len(foreign) {
+				t.Fatalf("got %d non-challenge records, want %d:\n%v", len(got), len(foreign), Describe(got))
+			}
+			for i := range foreign {
+				if got[i] != foreign[i] {
+					t.Fatalf("record %d changed: got %+v, want %+v", i, got[i], foreign[i])
+				}
+			}
+		})
+	}
+}

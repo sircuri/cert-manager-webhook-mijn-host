@@ -333,3 +333,35 @@ func TestConcurrentPresentsAreSerialized(t *testing.T) {
 		t.Fatalf("zone challenges = %v", got)
 	}
 }
+
+func TestReconcile_RefusesToWriteWhenAPIReturnsEmptyZone(t *testing.T) {
+	// The API answers with no records at all (broken or truncated response).
+	// Writing anything now would wipe the zone, so nothing may be written.
+	e := newTestEnv(t)
+	err := e.rec.Present(context.Background(), request("_acme-challenge.example.nl", "aaa"))
+	if !errors.Is(err, ErrEmptyZone) {
+		t.Fatalf("expected ErrEmptyZone, got %v", err)
+	}
+	if e.dns.puts != 0 {
+		t.Fatalf("PUT was sent against an empty zone view")
+	}
+	// The intent is kept, so the record is written once the API is sane again.
+	_ = e.dns.PutRecords(context.Background(), testZone, []mijnhost.DNSRecord{recA})
+	if err := e.rec.Sweep(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if !e.dns.has(testZone, chalA) {
+		t.Fatal("record not written after API recovered")
+	}
+}
+
+func TestReconcile_RefusesToWriteWhenAPIReturnsOnlyChallengeRecords(t *testing.T) {
+	e := newTestEnv(t, chalOld)
+	err := e.rec.Present(context.Background(), request("_acme-challenge.example.nl", "aaa"))
+	if !errors.Is(err, ErrEmptyZone) {
+		t.Fatalf("expected ErrEmptyZone, got %v", err)
+	}
+	if e.dns.puts != 0 {
+		t.Fatalf("PUT was sent against a challenge-only zone view")
+	}
+}

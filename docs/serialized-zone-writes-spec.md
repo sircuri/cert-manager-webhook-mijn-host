@@ -117,6 +117,13 @@ directions harmless: a needed record missing from a stale GET is re-added from
 is not in `desired`. Records that are not challenge records are passed
 through untouched.
 
+Safety guard: if the GET returns no non-challenge records at all, the
+reconcile fails with `ErrEmptyZone` and nothing is written. A real zone always
+has A, AAAA, MX or NS records, so an empty answer is a broken or truncated API
+response, and a PUT built from it would wipe the zone. The stored intent is
+kept, so the next request or sweep completes the write once the API answers
+sanely.
+
 Chart option `ownAcmeRecords` (default `true`) enables dropping challenge
 records the webhook does not know. With `false`, unknown challenge records
 are kept, which means stale reads can resurrect removed records; documented

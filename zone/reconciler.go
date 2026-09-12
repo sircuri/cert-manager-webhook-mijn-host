@@ -169,6 +169,10 @@ func (r *Reconciler) reconcile(ctx context.Context, op, zone string, secretRef *
 	if err != nil {
 		return err
 	}
+	if err := sanityCheckZone(zone, current); err != nil {
+		log.Error(err, "refusing to write zone")
+		return err
+	}
 	payload, diff := ComputePayload(current, desiredRecords(h.State), remove, r.opts.OwnAcmeRecords)
 	if !diff.Changed() {
 		log.Info("zone in sync, no write needed", "challengeRecords", diff.Kept)
@@ -199,4 +203,19 @@ func desiredRecords(st State) []mijnhost.DNSRecord {
 		out = append(out, mijnhost.DNSRecord{Type: "TXT", Name: rec.Name, Value: rec.Value, TTL: rec.TTL})
 	}
 	return out
+}
+
+// ErrEmptyZone is returned when the API claims a zone has no records other
+// than challenge records. A real zone always has at least an A, AAAA, MX or
+// NS record, so this is treated as a broken or truncated API response and
+// nothing is written: a PUT built from it would wipe the zone.
+var ErrEmptyZone = errors.New("API returned a zone without any non-challenge records")
+
+func sanityCheckZone(zone string, records []mijnhost.DNSRecord) error {
+	for _, r := range records {
+		if !IsChallengeRecord(r) {
+			return nil
+		}
+	}
+	return fmt.Errorf("zone %s: %w", zone, ErrEmptyZone)
 }
