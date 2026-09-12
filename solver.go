@@ -118,7 +118,6 @@ func (s *mijnHostSolver) handle(ch *v1alpha1.ChallengeRequest, action string, op
 
 	log := logf.Log.WithName("mijn-host").WithValues(
 		"action", action,
-		"challengeUID", string(ch.UID),
 		"dnsName", ch.DNSName,
 		"fqdn", strings.TrimSuffix(ch.ResolvedFQDN, "."),
 		"zone", strings.TrimSuffix(ch.ResolvedZone, "."),
@@ -161,6 +160,9 @@ func (s *mijnHostSolver) handle(ch *v1alpha1.ChallengeRequest, action string, op
 // triggerContext finds the Challenge, Order and Certificate behind a request
 // so the logs can say which certificate caused it. Best effort: any failure
 // is logged at debug level and the request proceeds without those fields.
+//
+// cert-manager does not fill the request's UID, so the Challenge is matched
+// on DNS name plus key, which together identify one challenge.
 func (s *mijnHostSolver) triggerContext(ctx context.Context, ch *v1alpha1.ChallengeRequest) []any {
 	if s.cmClient == nil {
 		return nil
@@ -178,7 +180,7 @@ func (s *mijnHostSolver) triggerContext(ctx context.Context, ch *v1alpha1.Challe
 	var orderName string
 	for i := range challenges.Items {
 		c := &challenges.Items[i]
-		if c.UID != ch.UID {
+		if c.Spec.DNSName != ch.DNSName || c.Spec.Key != ch.Key {
 			continue
 		}
 		fields = append(fields, "challenge", c.Name, "wildcard", c.Spec.Wildcard, "issuer", c.Spec.IssuerRef.Name)

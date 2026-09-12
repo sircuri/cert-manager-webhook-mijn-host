@@ -200,9 +200,11 @@ stale copy of the zone right after a write. To make that safe the webhook:
   mijn.host nameservers) just before the read and again just before the
   write. If it moved, someone changed the zone in the meantime and the
   upload was built from an outdated copy, so the webhook throws it away and
-  starts over from a fresh read. After its own write it waits for the serial
-  to advance and logs it. If the nameservers do not answer, the write goes
-  ahead without the check.
+  starts over from a fresh read. If the nameservers do not answer, the write
+  goes ahead without the check. Note that mijn.host publishes a zone to its
+  nameservers about a minute after a write, so an edit made shortly before
+  the webhook's read can still surface after its write; the check narrows
+  the window, it does not close it.
 - **Sweeps every known zone** at startup and every 15 minutes. Leftover
   `_acme-challenge` records from crashes or old versions are removed and lost
   records are written again, without waiting for a new certificate.

@@ -208,13 +208,18 @@ func TestTriggerContext_ResolvesCertificate(t *testing.T) {
 		ObjectMeta: metav1.ObjectMeta{
 			Name:            "wildcard-example-1-123-456",
 			Namespace:       "default",
-			UID:             types.UID("uid-1"),
 			OwnerReferences: []metav1.OwnerReference{{Kind: "Order", Name: order.Name}},
 		},
-		Spec: cmacme.ChallengeSpec{Wildcard: true, IssuerRef: cmmeta.IssuerReference{Name: "letsencrypt-prod"}},
+		Spec: cmacme.ChallengeSpec{DNSName: "example.com", Key: "k", Wildcard: true, IssuerRef: cmmeta.IssuerReference{Name: "letsencrypt-prod"}},
+	}
+	// Same DNS name, different key: another challenge for the same domain
+	// (e.g. the apex challenge of a wildcard order) must not be matched.
+	other := &cmacme.Challenge{
+		ObjectMeta: metav1.ObjectMeta{Name: "other", Namespace: "default"},
+		Spec:       cmacme.ChallengeSpec{DNSName: "example.com", Key: "other-key"},
 	}
 	solver := newTestSolver(&fakeHandler{})
-	solver.cmClient = cmfake.NewSimpleClientset(order, challenge)
+	solver.cmClient = cmfake.NewSimpleClientset(order, other, challenge)
 
 	fields := solver.triggerContext(context.Background(), challengeRequest("example.com.", "_acme-challenge.example.com.", "k", validConfig()))
 	got := map[string]any{}
