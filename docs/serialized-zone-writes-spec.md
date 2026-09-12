@@ -124,6 +124,22 @@ response, and a PUT built from it would wipe the zone. The stored intent is
 kept, so the next request or sweep completes the write once the API answers
 sanely.
 
+Change check between read and write: the mijn.host HTTP API exposes no
+version, ETag or conditional write, but the zone's SOA serial (a Unix
+timestamp of the last change, served by ns1/ns2/ns3.mijn.host) moves on every
+API write. The reconcile reads the serial before the GET and again just
+before the PUT. If it moved, the upload was built from an outdated copy and
+the attempt starts over with a fresh GET, up to `MaxWriteAttempts` (5); then
+the request fails with `ErrZoneChanging` and cert-manager retries later. The
+webhook never writes over a change it has observed. After its own PUT it
+waits up to 15 s for the serial to advance, logging either way. If no
+nameserver answers, the check is skipped and the write proceeds (chart value
+`zone.serialCheck`: `best-effort`, `required`, `off`). Limits: the serial has
+one-second resolution, and the check is not a true compare-and-swap; the
+unprotected window is the few milliseconds between the last serial read and
+the PUT. Deliberately not stored across operations: the webhook must keep
+working through external DNS edits, which are normal.
+
 Chart option `ownAcmeRecords` (default `true`) enables dropping challenge
 records the webhook does not know. With `false`, unknown challenge records
 are kept, which means stale reads can resurrect removed records; documented

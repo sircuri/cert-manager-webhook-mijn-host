@@ -83,6 +83,8 @@ func (s *mijnHostSolver) Initialize(kubeClientConfig *rest.Config, stopCh <-chan
 		zone.Options{
 			OwnAcmeRecords: s.settings.OwnAcmeRecords,
 			MaxRecordAge:   s.settings.MaxRecordAge,
+			Serial:         serialReader(s.settings.SerialCheck),
+			SerialRequired: s.settings.SerialCheck == serialCheckRequired,
 		})
 
 	log := logf.Log.WithName("mijn-host").WithValues("pod", s.settings.PodName)
@@ -93,7 +95,8 @@ func (s *mijnHostSolver) Initialize(kubeClientConfig *rest.Config, stopCh <-chan
 		"maxRecordAge", s.settings.MaxRecordAge,
 		"lockWaitTimeout", s.settings.LockWaitTimeout,
 		"lockDuration", s.settings.LockDuration,
-		"triggerContext", s.settings.TriggerContext)
+		"triggerContext", s.settings.TriggerContext,
+		"serialCheck", s.settings.SerialCheck)
 
 	go s.runSweeps(logr.NewContext(context.Background(), log), stopCh)
 	return nil
@@ -243,6 +246,15 @@ func (s *mijnHostSolver) runSweeps(ctx context.Context, stopCh <-chan struct{}) 
 			sweep()
 		}
 	}
+}
+
+// serialReader returns the SOA serial reader for the configured mode, or nil
+// when the check is off.
+func serialReader(mode string) zone.SerialReader {
+	if mode == serialCheckOff {
+		return nil
+	}
+	return zone.NewDNSSerialReader(3 * time.Second)
 }
 
 // getAPIKey reads the API key from a Kubernetes Secret.

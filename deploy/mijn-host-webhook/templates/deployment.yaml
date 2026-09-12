@@ -46,6 +46,8 @@ spec:
               value: {{ .Values.zone.lockDuration | quote }}
             - name: MIJN_HOST_TRIGGER_CONTEXT
               value: {{ .Values.triggerContext.enabled | quote }}
+            - name: MIJN_HOST_SERIAL_CHECK
+              value: {{ .Values.zone.serialCheck | quote }}
           ports:
             - name: https
               containerPort: 443

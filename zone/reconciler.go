@@ -36,9 +36,26 @@ type Options struct {
 	OwnAcmeRecords bool
 	// MaxRecordAge drops desired records older than this on load. Default 24h.
 	MaxRecordAge time.Duration
+	// Serial reads the zone's SOA serial for the change check between read
+	// and write. nil disables the check.
+	Serial SerialReader
+	// SerialRequired fails a request when the serial cannot be read instead
+	// of proceeding without the check.
+	SerialRequired bool
+	// MaxWriteAttempts bounds how often a write is restarted because the
+	// zone changed between read and write. Default 5.
+	MaxWriteAttempts int
+	// SerialWaitBudget and SerialWaitInterval tune the wait for the serial
+	// to advance after our own write. Defaults 15s and 1s.
+	SerialWaitBudget   time.Duration
+	SerialWaitInterval time.Duration
 	// Now overrides the clock, for tests.
 	Now func() time.Time
 }
+
+// ErrZoneChanging is returned when the zone serial kept moving between read
+// and write for every attempt. cert-manager retries the request later.
+var ErrZoneChanging = errors.New("zone changed externally on every write attempt")
 
 // Reconciler performs the locked read-modify-write cycle for a zone.
 type Reconciler struct {
@@ -57,6 +74,9 @@ func NewReconciler(lock Locker, store Store, newAPI func(apiKey string) DNSAPI, 
 	}
 	if opts.Now == nil {
 		opts.Now = time.Now
+	}
+	if opts.MaxWriteAttempts <= 0 {
+		opts.MaxWriteAttempts = 5
 	}
 	return &Reconciler{lock: lock, store: store, newAPI: newAPI, apiKey: apiKey, opts: opts}
 }
@@ -164,22 +184,83 @@ func (r *Reconciler) reconcile(ctx context.Context, op, zone string, secretRef *
 		return fmt.Errorf("read API key %s: %w", h.State.APIKeySecretRef.String(), err)
 	}
 	api := r.newAPI(apiKey)
+	desired := desiredRecords(h.State)
 
-	current, err := api.GetRecords(ctx, zone)
-	if err != nil {
-		return err
-	}
-	if err := sanityCheckZone(zone, current); err != nil {
-		log.Error(err, "refusing to write zone")
-		return err
-	}
-	payload, diff := ComputePayload(current, desiredRecords(h.State), remove, r.opts.OwnAcmeRecords)
-	if !diff.Changed() {
-		log.Info("zone in sync, no write needed", "challengeRecords", diff.Kept)
+	for attempt := 1; attempt <= r.opts.MaxWriteAttempts; attempt++ {
+		before, checkable := r.readSerial(ctx, zone, "before read")
+		if r.opts.SerialRequired && !checkable {
+			return fmt.Errorf("zone %s: %w", zone, ErrSerialUnavailable)
+		}
+
+		current, err := api.GetRecords(ctx, zone)
+		if err != nil {
+			return err
+		}
+		if err := sanityCheckZone(zone, current); err != nil {
+			log.Error(err, "refusing to write zone")
+			return err
+		}
+		payload, diff := ComputePayload(current, desired, remove, r.opts.OwnAcmeRecords)
+		if !diff.Changed() {
+			log.Info("zone in sync, no write needed", "challengeRecords", diff.Kept, "serial", before)
+			return nil
+		}
+
+		if checkable {
+			// The atomic check: if the zone changed since we read it, our
+			// upload was built from an outdated copy. Start over.
+			now, ok := r.readSerial(ctx, zone, "before write")
+			if ok && now != before {
+				log.Info("zone changed externally between read and write, starting over",
+					"attempt", attempt, "serialAtRead", before, "serialNow", now)
+				continue
+			}
+			if !ok && r.opts.SerialRequired {
+				return fmt.Errorf("zone %s: %w", zone, ErrSerialUnavailable)
+			}
+		}
+
+		log.Info("zone write", "attempt", attempt, "add", Describe(diff.Add), "remove", Describe(diff.Remove),
+			"keep", diff.Kept, "total", len(payload), "serial", before)
+		if err := api.PutRecords(ctx, zone, payload); err != nil {
+			return err
+		}
+		if checkable {
+			waitForSerialAdvance(ctx, log, r.opts.Serial, zone, before, r.serialWaitBudget(), r.serialWaitInterval())
+		}
 		return nil
 	}
-	log.Info("zone write", "add", Describe(diff.Add), "remove", Describe(diff.Remove), "keep", diff.Kept, "total", len(payload))
-	return api.PutRecords(ctx, zone, payload)
+	log.Error(ErrZoneChanging, "giving up for now, cert-manager will retry", "attempts", r.opts.MaxWriteAttempts)
+	return fmt.Errorf("zone %s: %w", zone, ErrZoneChanging)
+}
+
+// readSerial reads the zone serial when a SerialReader is configured. The
+// second result is false when the check is disabled or no nameserver
+// answered; the caller then proceeds without the check (unless required).
+func (r *Reconciler) readSerial(ctx context.Context, zone, when string) (uint32, bool) {
+	if r.opts.Serial == nil {
+		return 0, false
+	}
+	serial, err := r.opts.Serial.Serial(ctx, zone)
+	if err != nil {
+		logr.FromContextOrDiscard(ctx).Info("zone serial check skipped", "when", when, "reason", err.Error())
+		return 0, false
+	}
+	return serial, true
+}
+
+func (r *Reconciler) serialWaitBudget() time.Duration {
+	if r.opts.SerialWaitBudget > 0 {
+		return r.opts.SerialWaitBudget
+	}
+	return 15 * time.Second
+}
+
+func (r *Reconciler) serialWaitInterval() time.Duration {
+	if r.opts.SerialWaitInterval > 0 {
+		return r.opts.SerialWaitInterval
+	}
+	return time.Second
 }
 
 func (r *Reconciler) dropExpired(st *State) []mijnhost.DNSRecord {

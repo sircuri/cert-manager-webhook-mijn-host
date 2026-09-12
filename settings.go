@@ -30,7 +30,17 @@ type Settings struct {
 	// TriggerContext enables the Challenge -> Order -> Certificate lookup
 	// that names the certificate behind a request in the logs.
 	TriggerContext bool
+	// SerialCheck is "best-effort" (default), "required" or "off". It compares
+	// the zone's SOA serial before the read and before the write; if the zone
+	// changed in between, the write starts over from a fresh read.
+	SerialCheck string
 }
+
+const (
+	serialCheckBestEffort = "best-effort"
+	serialCheckRequired   = "required"
+	serialCheckOff        = "off"
+)
 
 const serviceAccountNamespaceFile = "/var/run/secrets/kubernetes.io/serviceaccount/namespace"
 
@@ -45,6 +55,7 @@ func loadSettings() (Settings, error) {
 		LockWaitTimeout: 25 * time.Second,
 		LockDuration:    60 * time.Second,
 		TriggerContext:  true,
+		SerialCheck:     serialCheckBestEffort,
 	}
 	if s.PodName == "" {
 		s.PodName, _ = os.Hostname()
@@ -76,6 +87,14 @@ func loadSettings() (Settings, error) {
 	}
 	if s.TriggerContext, err = envBool("MIJN_HOST_TRIGGER_CONTEXT", s.TriggerContext); err != nil {
 		return s, err
+	}
+	if v := os.Getenv("MIJN_HOST_SERIAL_CHECK"); v != "" {
+		switch v {
+		case serialCheckBestEffort, serialCheckRequired, serialCheckOff:
+			s.SerialCheck = v
+		default:
+			return s, fmt.Errorf("MIJN_HOST_SERIAL_CHECK: %q is not one of best-effort, required, off", v)
+		}
 	}
 	return s, nil
 }

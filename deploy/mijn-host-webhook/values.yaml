@@ -40,6 +40,13 @@ zone:
   lockWaitTimeout: 25s
   # After this an unreleased lock (crashed pod) is taken over.
   lockDuration: 60s
+  # Change check between read and write using the zone's SOA serial from the
+  # authoritative nameservers. If the zone changed after the webhook read it
+  # (someone edited DNS by hand), the write starts over from a fresh read.
+  #   best-effort: check when the nameservers answer, otherwise write anyway
+  #   required:    fail the request when the serial cannot be read
+  #   off:         no check
+  serialCheck: best-effort
 
 # Look up the Challenge, Order and Certificate behind each request so the
 # logs say which certificate triggered a DNS change. Needs read access to
