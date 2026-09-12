@@ -1,216 +1,170 @@
+// Package mijnhost is a minimal client for the mijn.host DNS API.
+//
+// The API only offers full-zone operations: GET returns every record in a
+// zone and PUT replaces every record in a zone. The API is also not
+// read-your-writes consistent: a GET shortly after a PUT can return the zone
+// as it was before the PUT. This package deliberately exposes nothing but
+// those two calls. Deciding what a PUT must contain, and making sure only one
+// caller writes a zone at a time, is the job of the zone package.
 package mijnhost
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
+	"fmt"
+	"io"
+	"net/http"
+	"net/url"
 	"strings"
-	"sync"
+	"time"
+
+	"github.com/go-logr/logr"
 )
 
-// txtKey identifies a TXT record in our cache. Multiple values can coexist
-// at the same name, which is required for wildcard certs (apex + wildcard
-// challenges share _acme-challenge.<zone>).
-type txtKey struct {
-	name  string // absolute, with trailing dot, as the API stores it
-	value string
+const defaultBaseURL = "https://mijn.host/api/v2/"
+
+// DNSRecord mirrors the mijn.host API JSON shape for a single DNS record.
+// Names are absolute with a trailing dot, e.g. "_acme-challenge.example.nl.".
+type DNSRecord struct {
+	Type  string `json:"type"`
+	Name  string `json:"name"`
+	Value string `json:"value"`
+	TTL   int    `json:"ttl"`
 }
 
-// recordID is the dedup key when merging records (type+name+value).
-type recordID struct {
-	Type, Name, Value string
-}
-
-// Client manages TXT records on mijn.host zones for cert-manager DNS-01
-// challenges.
-//
-// The mijn.host API is full-zone PUT and read-after-write inconsistent:
-// a GET shortly after a PUT can return the pre-write zone state, even
-// from the same caller. The libdns/mijnhost provider's Get-Modify-PUT
-// helpers turn that into a real race for wildcard certs, where apex
-// and wildcard challenges write to the same _acme-challenge.<zone>
-// RRset; a stale GET inside the second writer's AppendRecords causes
-// the PUT payload to omit (and therefore delete) the first writer's
-// record.
-//
-// To make writes deterministic regardless of API read consistency,
-// Client maintains an in-memory authoritative cache of TXT records
-// it has added. Every PUT merges the API's current zone state with
-// this cache, so a stale GET cannot lose records this Client already
-// wrote. The mutex serializes operations on a single Client, which is
-// shared across all challenges via the solver.
+// Client talks to the mijn.host API for one API key. It holds no state
+// between calls and is safe for concurrent use.
 type Client struct {
-	api *httpAPI
-
-	mu sync.Mutex
-	// cache: zone -> our TXT records (key=(absName,value)) -> ttl.
-	// Cache is the source of truth for records this Client wrote, and
-	// is unioned into every PUT payload to compensate for API stale reads.
-	cache map[string]map[txtKey]int
+	baseURL string
+	apiKey  string
+	http    *http.Client
 }
 
-// NewClient creates a new mijn.host DNS client with the given API key.
-// A single Client must be reused across requests so the mutex serializes
-// concurrent writes and the cache survives between calls.
+// NewClient creates a client for the given API key.
 func NewClient(apiKey string) *Client {
 	return &Client{
-		api:   newHTTPAPI(apiKey),
-		cache: make(map[string]map[txtKey]int),
+		baseURL: defaultBaseURL,
+		apiKey:  apiKey,
+		http:    &http.Client{Timeout: 30 * time.Second},
 	}
 }
 
-// AddTXTRecord adds a TXT record to the given zone.
-//
-// Idempotent: if the record is already in our cache, no API calls happen.
-// Otherwise: GET the zone, union the API view with our cache (cache wins
-// for our records, API contributes everything else), append the new
-// record, PUT the merged set, then update the cache. The cache merge is
-// what defends against the API's stale read view.
-func (c *Client) AddTXTRecord(ctx context.Context, zone, name, value string, ttl int) error {
-	zone = strings.TrimSuffix(zone, ".")
-	absName := absoluteName(name, zone)
-	key := txtKey{name: absName, value: value}
-
-	c.mu.Lock()
-	defer c.mu.Unlock()
-
-	if zc := c.cache[zone]; zc != nil {
-		if _, ok := zc[key]; ok {
-			return nil
-		}
+// NewClientWithBaseURL creates a client against a custom API base URL. Used
+// by tests that run a mock server.
+func NewClientWithBaseURL(apiKey, baseURL string, httpClient *http.Client) *Client {
+	if httpClient == nil {
+		httpClient = &http.Client{Timeout: 30 * time.Second}
 	}
-
-	apiRecords, err := c.api.getRecords(ctx, zone)
-	if err != nil {
-		return err
-	}
-
-	desired := mergeRecords(apiRecords, c.cache[zone])
-	desired = appendIfMissing(desired, DNSRecord{
-		Type:  "TXT",
-		Name:  absName,
-		Value: value,
-		TTL:   ttl,
-	})
-
-	if err := c.api.putRecords(ctx, zone, desired); err != nil {
-		return err
-	}
-
-	if c.cache[zone] == nil {
-		c.cache[zone] = make(map[txtKey]int)
-	}
-	c.cache[zone][key] = ttl
-	return nil
+	return &Client{baseURL: baseURL, apiKey: apiKey, http: httpClient}
 }
 
-// RemoveTXTRecord removes a TXT record from the given zone.
-//
-// Idempotent: if the record is neither in the API response nor our cache,
-// returns nil without issuing a PUT. Otherwise: GET, merge with cache,
-// drop the record, PUT, update cache.
-func (c *Client) RemoveTXTRecord(ctx context.Context, zone, name, value string) error {
-	zone = strings.TrimSuffix(zone, ".")
-	absName := absoluteName(name, zone)
-	key := txtKey{name: absName, value: value}
+type apiStatus struct {
+	Status            int    `json:"status"`
+	StatusDescription string `json:"status_description"`
+}
 
-	c.mu.Lock()
-	defer c.mu.Unlock()
-
-	apiRecords, err := c.api.getRecords(ctx, zone)
-	if err != nil {
-		return err
-	}
-
-	inCache := false
-	if zc := c.cache[zone]; zc != nil {
-		_, inCache = zc[key]
-	}
-	inAPI := false
-	for _, r := range apiRecords {
-		if r.Type == "TXT" && r.Name == absName && r.Value == value {
-			inAPI = true
-			break
-		}
-	}
-	if !inCache && !inAPI {
+func (s apiStatus) err() error {
+	if s.Status >= 200 && s.Status < 300 {
 		return nil
 	}
+	return fmt.Errorf("mijn.host API status %d: %s", s.Status, s.StatusDescription)
+}
 
-	desired := mergeRecords(apiRecords, c.cache[zone])
-	desired = removeRecord(desired, "TXT", absName, value)
+// GetRecords fetches the full DNS record set for zone.
+func (c *Client) GetRecords(ctx context.Context, zone string) ([]DNSRecord, error) {
+	log := logr.FromContextOrDiscard(ctx)
+	start := time.Now()
 
-	if err := c.api.putRecords(ctx, zone, desired); err != nil {
+	var resp struct {
+		apiStatus
+		Data struct {
+			Records []DNSRecord `json:"records"`
+		} `json:"data"`
+	}
+	err := c.do(ctx, http.MethodGet, c.dnsPath(zone), nil, &resp)
+	if err == nil {
+		err = resp.err()
+	}
+	if err != nil {
+		log.Error(err, "mijn.host GET failed", "zone", zone, "duration", time.Since(start).Round(time.Millisecond))
+		return nil, fmt.Errorf("get records for zone %s: %w", zone, err)
+	}
+	log.Info("mijn.host GET", "zone", zone, "records", len(resp.Data.Records),
+		"challengeRecords", countChallengeRecords(resp.Data.Records), "duration", time.Since(start).Round(time.Millisecond))
+	return resp.Data.Records, nil
+}
+
+// PutRecords replaces the full DNS record set for zone.
+func (c *Client) PutRecords(ctx context.Context, zone string, records []DNSRecord) error {
+	log := logr.FromContextOrDiscard(ctx)
+	start := time.Now()
+
+	body, err := json.Marshal(struct {
+		Records []DNSRecord `json:"records"`
+	}{records})
+	if err != nil {
 		return err
 	}
-
-	if c.cache[zone] != nil {
-		delete(c.cache[zone], key)
+	var resp apiStatus
+	err = c.do(ctx, http.MethodPut, c.dnsPath(zone), bytes.NewReader(body), &resp)
+	if err == nil {
+		err = resp.err()
 	}
+	if err != nil {
+		log.Error(err, "mijn.host PUT failed", "zone", zone, "records", len(records), "duration", time.Since(start).Round(time.Millisecond))
+		return fmt.Errorf("put records for zone %s: %w", zone, err)
+	}
+	log.Info("mijn.host PUT", "zone", zone, "records", len(records),
+		"challengeRecords", countChallengeRecords(records), "duration", time.Since(start).Round(time.Millisecond))
 	return nil
 }
 
-// mergeRecords returns the union of API records and cached TXT records,
-// deduped by (type, name, value). Cached records win on TTL when the
-// dedup key matches.
-func mergeRecords(api []DNSRecord, cache map[txtKey]int) []DNSRecord {
-	out := make([]DNSRecord, 0, len(api)+len(cache))
-	seen := make(map[recordID]bool, len(api)+len(cache))
-
-	for k, ttl := range cache {
-		id := recordID{Type: "TXT", Name: k.name, Value: k.value}
-		seen[id] = true
-		out = append(out, DNSRecord{
-			Type:  "TXT",
-			Name:  k.name,
-			Value: k.value,
-			TTL:   ttl,
-		})
-	}
-	for _, r := range api {
-		id := recordID{Type: r.Type, Name: r.Name, Value: r.Value}
-		if seen[id] {
-			continue
-		}
-		seen[id] = true
-		out = append(out, r)
-	}
-	return out
-}
-
-// appendIfMissing adds r to records if no entry with the same
-// (type, name, value) is already present.
-func appendIfMissing(records []DNSRecord, r DNSRecord) []DNSRecord {
-	for _, existing := range records {
-		if existing.Type == r.Type && existing.Name == r.Name && existing.Value == r.Value {
-			return records
-		}
-	}
-	return append(records, r)
-}
-
-// removeRecord returns records with any entry matching (type, name, value)
-// removed.
-func removeRecord(records []DNSRecord, recType, name, value string) []DNSRecord {
-	out := records[:0]
+func countChallengeRecords(records []DNSRecord) int {
+	n := 0
 	for _, r := range records {
-		if r.Type == recType && r.Name == name && r.Value == value {
-			continue
+		if r.Type == "TXT" && strings.HasPrefix(r.Name, "_acme-challenge.") {
+			n++
 		}
-		out = append(out, r)
 	}
-	return out
+	return n
 }
 
-// absoluteName returns the FQDN form (with trailing dot) of name relative
-// to zone, matching how the mijn.host API stores names. zone may be passed
-// with or without a trailing dot; name may already be relative or absolute.
-func absoluteName(name, zone string) string {
-	name = strings.TrimSuffix(name, ".")
-	zone = strings.TrimSuffix(zone, ".")
-	if name == "" || name == "@" {
-		return zone + "."
+func (c *Client) dnsPath(zone string) string {
+	return fmt.Sprintf("domains/%s/dns", url.PathEscape(strings.TrimSuffix(zone, ".")))
+}
+
+func (c *Client) do(ctx context.Context, method, path string, body io.Reader, out any) error {
+	base, err := url.Parse(c.baseURL)
+	if err != nil {
+		return err
 	}
-	if name == zone || strings.HasSuffix(name, "."+zone) {
-		return name + "."
+	rel, err := url.Parse(path)
+	if err != nil {
+		return err
 	}
-	return name + "." + zone + "."
+	u := base.ResolveReference(rel)
+
+	req, err := http.NewRequestWithContext(ctx, method, u.String(), body)
+	if err != nil {
+		return err
+	}
+	req.Header.Set("accept", "application/json")
+	req.Header.Set("content-type", "application/json")
+	req.Header.Set("api-key", c.apiKey)
+	req.Header.Set("user-agent", "cert-manager-webhook-mijn-host")
+
+	resp, err := c.http.Do(req)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = resp.Body.Close() }()
+
+	if !strings.HasPrefix(resp.Header.Get("content-type"), "application/json") {
+		return fmt.Errorf("non-JSON response (HTTP %d)", resp.StatusCode)
+	}
+	if out == nil {
+		return nil
+	}
+	return json.NewDecoder(resp.Body).Decode(out)
 }

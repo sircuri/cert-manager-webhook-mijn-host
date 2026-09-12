@@ -19,6 +19,41 @@ certManager:
 
 secretName: mijn-host-api-key
 
+# Zone write coordination. The mijn.host API replaces the whole zone on every
+# write and can return stale reads, so the webhook serializes writes per zone
+# across all replicas (a Lease per zone) and keeps the challenge records it
+# wants in a ConfigMap per zone. Both live in the release namespace.
+zone:
+  # Treat the ConfigMap as the only truth for _acme-challenge TXT records in
+  # managed zones: anything else with that name is removed on the next write
+  # or sweep. This is what cleans up leftovers after crashes. Set to false if
+  # another ACME client shares these zones; leftovers are then never removed.
+  ownAcmeRecords: true
+  # How often every known zone is compared with its desired state and fixed.
+  # Also runs once at startup. "0" disables both the startup and periodic sweep.
+  sweepInterval: 15m
+  # Desired records older than this are dropped. cert-manager always cleans
+  # up after itself; this is the safety net for a crash mid-challenge.
+  maxRecordAge: 24h
+  # How long one request waits for the zone lock before failing (cert-manager
+  # retries). The apiserver cuts webhook requests at 60s, keep this well below.
+  lockWaitTimeout: 25s
+  # After this an unreleased lock (crashed pod) is taken over.
+  lockDuration: 60s
+  # Change check between read and write using the zone's SOA serial from the
+  # authoritative nameservers. If the zone changed after the webhook read it
+  # (someone edited DNS by hand), the write starts over from a fresh read.
+  #   best-effort: check when the nameservers answer, otherwise write anyway
+  #   required:    fail the request when the serial cannot be read
+  #   off:         no check
+  serialCheck: best-effort
+
+# Look up the Challenge, Order and Certificate behind each request so the
+# logs say which certificate triggered a DNS change. Needs read access to
+# cert-manager Challenges and Orders cluster-wide.
+triggerContext:
+  enabled: true
+
 # The webhook is an aggregated apiserver. When its only pod is gone, the
 # v1alpha1.<groupName> APIService goes Unavailable and breaks cluster-wide API
 # discovery (helm reports "cluster unreachable"). Run at least 2 replicas.

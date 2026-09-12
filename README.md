@@ -26,7 +26,10 @@ logged to Certificate Transparency logs, keeping internal hostnames private.
 > Every update is a read-modify-write cycle: the webhook fetches all records for
 > the zone, applies the change in memory, and writes the entire record set back.
 > This means a bug or unexpected API response could potentially affect other
-> records in the zone.
+> records in the zone. Writes are serialized per zone across replicas and the
+> webhook keeps its own record of the challenge records it wants, so stale API
+> reads cannot lose or resurrect challenge records. See "How writes are
+> coordinated" below.
 >
 > **Recommendation:** test with Let's Encrypt staging first, and keep a backup
 > of your DNS zone before using this webhook in production.
@@ -140,6 +143,19 @@ spec:
 | `apiKeySecretRef.key` | string | *required* | Key within the Secret |
 | `ttl` | int | `300` | TTL in seconds for the DNS TXT record |
 
+### Chart values reference
+
+| Value | Default | Description |
+|-------|---------|-------------|
+| `replicaCount` | `2` | Replicas. Two keep the aggregated APIService available during restarts; writes are serialized across replicas. |
+| `zone.ownAcmeRecords` | `true` | The webhook owns every `_acme-challenge` TXT record in zones it manages and removes leftovers. |
+| `zone.sweepInterval` | `15m` | How often all known zones are checked and repaired, also once at startup. `0` disables sweeps. |
+| `zone.maxRecordAge` | `24h` | Desired records older than this are dropped (safety net for crashes mid-challenge). |
+| `zone.lockWaitTimeout` | `25s` | How long a request waits for the zone lock before failing; cert-manager retries. |
+| `zone.lockDuration` | `60s` | After this an unreleased zone lock is taken over. |
+| `zone.serialCheck` | `best-effort` | Compare the zone's SOA serial before read and before write; start over if it moved. `required` fails when nameservers do not answer, `off` disables. |
+| `triggerContext.enabled` | `true` | Look up Challenge, Order and Certificate for log context. Adds a read-only ClusterRole. |
+
 ## Requesting a wildcard certificate
 
 Create a Certificate resource referencing the ClusterIssuer:
@@ -168,22 +184,69 @@ kubectl describe order -n default
 kubectl describe challenge -n default
 ```
 
-### Known limitation: concurrent challenges
+### How writes are coordinated
 
-When a certificate includes both a wildcard and a bare domain (e.g.
-`*.example.com` and `example.com`), cert-manager creates two DNS-01 challenges
-for the same `_acme-challenge` TXT record. Because the mijn.host API replaces
-the entire record set on every write, concurrent challenge updates can
-occasionally overwrite each other, causing the first attempt to fail.
+The mijn.host API replaces the whole zone on every write and can return a
+stale copy of the zone right after a write. To make that safe the webhook:
 
-cert-manager will automatically retry with a new order after a backoff period
-(up to an hour), and the retry typically succeeds. If you don't want to wait,
-you can speed things up by deleting and recreating the Certificate resource:
+- **Locks each zone** with a Kubernetes Lease (`mijn-host-zone-<zone>` in
+  the release namespace) while it reads and writes, so only one webhook pod
+  writes a zone at a time, no matter how many replicas run.
+- **Remembers what it wants** in a ConfigMap per zone (same name). Every
+  upload is built from the non-challenge records mijn.host returned plus
+  exactly the challenge records in that ConfigMap. A stale read can neither
+  drop a record that is still needed nor bring back one that was removed.
+- **Checks the zone serial** (DNS's own version number, read from the
+  mijn.host nameservers) just before the read and again just before the
+  write. If it moved, someone changed the zone in the meantime and the
+  upload was built from an outdated copy, so the webhook throws it away and
+  starts over from a fresh read. After its own write it waits for the serial
+  to advance and logs it. If the nameservers do not answer, the write goes
+  ahead without the check.
+- **Sweeps every known zone** at startup and every 15 minutes. Leftover
+  `_acme-challenge` records from crashes or old versions are removed and lost
+  records are written again, without waiting for a new certificate.
+
+Because the ConfigMap is the only truth for `_acme-challenge` TXT records in
+a managed zone, another ACME client that shares the zone would have its
+records removed. Set `zone.ownAcmeRecords=false` in that case; leftovers are
+then no longer cleaned up.
+
+Inspect the state:
 
 ```bash
-kubectl delete certificate <name> -n <namespace>
-kubectl apply -f certificate.yaml
+kubectl get lease,configmap -n cert-manager -l app.kubernetes.io/managed-by=mijn-host-webhook
+kubectl get configmap -n cert-manager mijn-host-zone-example-com -o jsonpath='{.data.state}' | jq
 ```
+
+### Following a challenge in the logs
+
+Every request logs its start, each step, and its outcome, so a DNS-01
+challenge can be followed end to end:
+
+```
+challenge request received action=Present challengeUID=… dnsName=example.com fqdn=_acme-challenge.example.com zone=example.com namespace=default pod=… certificate=default/wildcard-example-com order=… challenge=… wildcard=true issuer=letsencrypt-prod
+zone lock acquired op=present zone=example.com lease=mijn-host-zone-example-com waited=0s
+zone state op=present zone=example.com records=1 before=0 expired=0 apiKeySecret=cert-manager/mijn-host-api-key[api-key]
+mijn.host GET op=present zone=example.com records=12 challengeRecords=0 duration=310ms
+zone write op=present zone=example.com add=[_acme-challenge.example.com.=…] remove=[] keep=0 total=13
+mijn.host PUT op=present zone=example.com records=13 challengeRecords=1 duration=420ms
+challenge request done action=Present … duration=812ms
+```
+
+The `certificate`, `order` and `challenge` fields come from a best-effort
+lookup of the cert-manager resources behind the request (chart value
+`triggerContext.enabled`). Sweeps log `sweep started`, one line per zone
+(`zone in sync, no write needed` or `zone write …`), and `sweep finished`.
+
+```bash
+kubectl logs -n cert-manager -l app.kubernetes.io/name=mijn-host-webhook --all-containers --prefix -f
+```
+
+The cert-manager side of the flow (order created, challenge scheduled,
+propagation self-check, ACME validation) is visible as Events on the
+Challenge and Order resources: `kubectl describe challenge -A`. Events expire
+after an hour; the webhook logs do not.
 
 ## Development
 

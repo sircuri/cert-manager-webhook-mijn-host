@@ -26,6 +26,28 @@ spec:
           env:
             - name: GROUP_NAME
               value: {{ .Values.groupName | quote }}
+            - name: POD_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.name
+            - name: POD_NAMESPACE
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.namespace
+            - name: MIJN_HOST_OWN_ACME_RECORDS
+              value: {{ .Values.zone.ownAcmeRecords | quote }}
+            - name: MIJN_HOST_SWEEP_INTERVAL
+              value: {{ .Values.zone.sweepInterval | quote }}
+            - name: MIJN_HOST_MAX_RECORD_AGE
+              value: {{ .Values.zone.maxRecordAge | quote }}
+            - name: MIJN_HOST_LOCK_WAIT_TIMEOUT
+              value: {{ .Values.zone.lockWaitTimeout | quote }}
+            - name: MIJN_HOST_LOCK_DURATION
+              value: {{ .Values.zone.lockDuration | quote }}
+            - name: MIJN_HOST_TRIGGER_CONTEXT
+              value: {{ .Values.triggerContext.enabled | quote }}
+            - name: MIJN_HOST_SERIAL_CHECK
+              value: {{ .Values.zone.serialCheck | quote }}
           ports:
             - name: https
               containerPort: 443
