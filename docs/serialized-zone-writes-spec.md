@@ -117,12 +117,14 @@ directions harmless: a needed record missing from a stale GET is re-added from
 is not in `desired`. Records that are not challenge records are passed
 through untouched.
 
-Safety guard: if the GET returns no non-challenge records at all, the
-reconcile fails with `ErrEmptyZone` and nothing is written. A real zone always
-has A, AAAA, MX or NS records, so an empty answer is a broken or truncated API
-response, and a PUT built from it would wipe the zone. The stored intent is
-kept, so the next request or sweep completes the write once the API answers
-sanely.
+Safety guard: if the GET returns no non-challenge records at all, the zone is
+read a second time before anything is written. A domain can legitimately have
+no records of its own (a parked domain: mijn.host serves SOA and NS itself and
+does not list them in the API), so an empty zone is not an error. But an empty
+answer can also be a glitch, and a PUT built from it would wipe the zone. The
+write is therefore built from the second read: if that one shows records, the
+first was a glitch and the records are kept; if it is empty too, the zone is
+treated as really empty and the challenge record is written.
 
 Change check between read and write: the mijn.host HTTP API exposes no
 version, ETag or conditional write, but the zone's SOA serial (a Unix
