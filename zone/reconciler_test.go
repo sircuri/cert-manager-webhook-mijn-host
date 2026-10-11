@@ -334,34 +334,40 @@ func TestConcurrentPresentsAreSerialized(t *testing.T) {
 	}
 }
 
-func TestReconcile_RefusesToWriteWhenAPIReturnsEmptyZone(t *testing.T) {
-	// The API answers with no records at all (broken or truncated response).
-	// Writing anything now would wipe the zone, so nothing may be written.
+func TestReconcile_WritesToZoneWithoutOwnRecords(t *testing.T) {
+	// A parked domain has no records in the API at all. Present and cleanup
+	// must still work; the empty read is confirmed by a second GET.
 	e := newTestEnv(t)
-	err := e.rec.Present(context.Background(), request("_acme-challenge.example.nl", "aaa"))
-	if !errors.Is(err, ErrEmptyZone) {
-		t.Fatalf("expected ErrEmptyZone, got %v", err)
-	}
-	if e.dns.puts != 0 {
-		t.Fatalf("PUT was sent against an empty zone view")
-	}
-	// The intent is kept, so the record is written once the API is sane again.
-	_ = e.dns.PutRecords(context.Background(), testZone, []mijnhost.DNSRecord{recA})
-	if err := e.rec.Sweep(context.Background()); err != nil {
+	if err := e.rec.Present(context.Background(), request("_acme-challenge.example.nl", "aaa")); err != nil {
 		t.Fatal(err)
 	}
 	if !e.dns.has(testZone, chalA) {
-		t.Fatal("record not written after API recovered")
+		t.Fatal("challenge record not written to empty zone")
+	}
+	if e.dns.gets != 2 {
+		t.Fatalf("gets = %d, want 2 (empty read confirmed once)", e.dns.gets)
+	}
+	if err := e.rec.CleanUp(context.Background(), request("_acme-challenge.example.nl", "aaa")); err != nil {
+		t.Fatal(err)
+	}
+	if got := e.dns.challenges(testZone); len(got) != 0 {
+		t.Fatalf("challenges left after cleanup: %v", got)
 	}
 }
 
-func TestReconcile_RefusesToWriteWhenAPIReturnsOnlyChallengeRecords(t *testing.T) {
-	e := newTestEnv(t, chalOld)
-	err := e.rec.Present(context.Background(), request("_acme-challenge.example.nl", "aaa"))
-	if !errors.Is(err, ErrEmptyZone) {
-		t.Fatalf("expected ErrEmptyZone, got %v", err)
+func TestReconcile_EmptyReadGlitchUsesSecondRead(t *testing.T) {
+	// The first GET wrongly returns nothing; the second shows the real zone.
+	// The write must be built from the second read so recA survives.
+	e := newTestEnv(t)
+	e.dns.makeStale(1)
+	_ = e.dns.PutRecords(context.Background(), testZone, []mijnhost.DNSRecord{recA})
+	if err := e.rec.Present(context.Background(), request("_acme-challenge.example.nl", "aaa")); err != nil {
+		t.Fatal(err)
 	}
-	if e.dns.puts != 0 {
-		t.Fatalf("PUT was sent against a challenge-only zone view")
+	if !e.dns.has(testZone, recA) {
+		t.Fatal("existing record wiped by write built from glitched empty read")
+	}
+	if !e.dns.has(testZone, chalA) {
+		t.Fatal("challenge record not written")
 	}
 }

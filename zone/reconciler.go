@@ -192,12 +192,8 @@ func (r *Reconciler) reconcile(ctx context.Context, op, zone string, secretRef *
 			return fmt.Errorf("zone %s: %w", zone, ErrSerialUnavailable)
 		}
 
-		current, err := api.GetRecords(ctx, zone)
+		current, err := r.getRecords(ctx, api, zone)
 		if err != nil {
-			return err
-		}
-		if err := sanityCheckZone(zone, current); err != nil {
-			log.Error(err, "refusing to write zone")
 			return err
 		}
 		payload, diff := ComputePayload(current, desired, remove, r.opts.OwnAcmeRecords)
@@ -270,17 +266,37 @@ func desiredRecords(st State) []mijnhost.DNSRecord {
 	return out
 }
 
-// ErrEmptyZone is returned when the API claims a zone has no records other
-// than challenge records. A real zone always has at least an A, AAAA, MX or
-// NS record, so this is treated as a broken or truncated API response and
-// nothing is written: a PUT built from it would wipe the zone.
-var ErrEmptyZone = errors.New("API returned a zone without any non-challenge records")
+// getRecords reads the zone. A domain can legitimately have no records of
+// its own (a parked domain: mijn.host serves SOA and NS itself and does not
+// list them), but an empty answer can also be a glitch, and a PUT built from
+// a glitched read would wipe the zone. So an empty read is read once more
+// and only trusted when the second read agrees.
+func (r *Reconciler) getRecords(ctx context.Context, api DNSAPI, zone string) ([]mijnhost.DNSRecord, error) {
+	current, err := api.GetRecords(ctx, zone)
+	if err != nil || hasOwnRecords(current) {
+		return current, err
+	}
+	log := logr.FromContextOrDiscard(ctx)
+	log.Info("zone has no records of its own, reading again to confirm")
+	current, err = api.GetRecords(ctx, zone)
+	if err != nil {
+		return nil, err
+	}
+	if hasOwnRecords(current) {
+		log.Info("second read returned records, the empty read was a glitch", "records", len(current))
+	} else {
+		log.Info("zone confirmed empty apart from challenge records")
+	}
+	return current, nil
+}
 
-func sanityCheckZone(zone string, records []mijnhost.DNSRecord) error {
+// hasOwnRecords reports whether the zone holds any record that is not a
+// challenge record.
+func hasOwnRecords(records []mijnhost.DNSRecord) bool {
 	for _, r := range records {
 		if !IsChallengeRecord(r) {
-			return nil
+			return true
 		}
 	}
-	return fmt.Errorf("zone %s: %w", zone, ErrEmptyZone)
+	return false
 }
