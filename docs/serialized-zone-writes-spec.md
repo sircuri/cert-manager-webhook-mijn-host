@@ -126,6 +126,14 @@ write is therefore built from the second read: if that one shows records, the
 first was a glitch and the records are kept; if it is empty too, the zone is
 treated as really empty and the challenge record is written.
 
+Empty zones: mijn.host rejects a PUT without records ("No records provided")
+and has no call to delete a single record. So when removing the last
+challenge record of a parked domain would leave the upload empty, a TXT
+record `_placeholder.<zone>` is written in its place, valued with the date
+(`YYYY-MM-DD`, UTC) and TTL 86400. From then on it is an ordinary record of
+the zone: it is passed through untouched and the zone no longer counts as
+empty.
+
 Change check between read and write: the mijn.host HTTP API exposes no
 version, ETag or conditional write, but the zone's SOA serial (a Unix
 timestamp of the last change, served by ns1/ns2/ns3.mijn.host) moves on every

@@ -353,6 +353,25 @@ func TestReconcile_WritesToZoneWithoutOwnRecords(t *testing.T) {
 	if got := e.dns.challenges(testZone); len(got) != 0 {
 		t.Fatalf("challenges left after cleanup: %v", got)
 	}
+	// mijn.host rejects an empty record list, so the cleanup leaves a
+	// placeholder instead of nothing.
+	placeholder := mijnhost.DNSRecord{Type: "TXT", Name: "_placeholder.example.nl.", Value: "2026-09-12", TTL: 86400}
+	if got := e.dns.zones[testZone]; len(got) != 1 || got[0] != placeholder {
+		t.Fatalf("zone after cleanup = %+v, want only %+v", got, placeholder)
+	}
+
+	// The placeholder is an ordinary record from then on: the next
+	// challenge needs no confirming read and keeps it.
+	e.dns.gets = 0
+	if err := e.rec.Present(context.Background(), request("_acme-challenge.example.nl", "bbb")); err != nil {
+		t.Fatal(err)
+	}
+	if !e.dns.has(testZone, placeholder) || !e.dns.has(testZone, chalB) {
+		t.Fatalf("zone after second present = %+v", e.dns.zones[testZone])
+	}
+	if e.dns.gets != 1 {
+		t.Fatalf("gets = %d, want 1", e.dns.gets)
+	}
 }
 
 func TestReconcile_EmptyReadGlitchUsesSecondRead(t *testing.T) {

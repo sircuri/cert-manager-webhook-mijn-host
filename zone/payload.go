@@ -15,12 +15,21 @@ package zone
 import (
 	"sort"
 	"strings"
+	"time"
 
 	"github.com/sircuri/cert-manager-webhook-mijn-host/mijnhost"
 )
 
 // ChallengePrefix is the label ACME DNS-01 challenge records live under.
 const ChallengePrefix = "_acme-challenge."
+
+// PlaceholderLabel names the TXT record written when a zone would otherwise
+// be left without any record.
+const PlaceholderLabel = "_placeholder"
+
+// PlaceholderTTL is the TTL of the placeholder record: one day. Nothing looks
+// the record up, so its TTL does not matter beyond being accepted.
+const PlaceholderTTL = 86400
 
 // Key identifies a challenge record: absolute name (with trailing dot) plus
 // value. Several values can coexist under one name.
@@ -113,6 +122,12 @@ func dedupe(records []mijnhost.DNSRecord) []mijnhost.DNSRecord {
 		out = append(out, r)
 	}
 	return out
+}
+
+// Placeholder returns the record that keeps a zone from being uploaded
+// empty, valued with the date it was written.
+func Placeholder(zone string, now time.Time) mijnhost.DNSRecord {
+	return mijnhost.DNSRecord{Type: "TXT", Name: AbsoluteName(PlaceholderLabel, zone), Value: now.UTC().Format("2006-01-02"), TTL: PlaceholderTTL}
 }
 
 // Describe renders records as "name=value" strings for log output.
