@@ -134,6 +134,10 @@ func (f *fakeDNS) PutRecords(_ context.Context, zone string, records []mijnhost.
 	if f.putErr != nil {
 		return f.putErr
 	}
+	if len(records) == 0 {
+		// Like mijn.host: a PUT must carry at least one record.
+		return errors.New("mijn.host API status 400: No records provided")
+	}
 	f.zones[zone] = append([]mijnhost.DNSRecord(nil), records...)
 	f.lastPut = f.zones[zone]
 	return nil

@@ -201,6 +201,15 @@ func (r *Reconciler) reconcile(ctx context.Context, op, zone string, secretRef *
 			log.Info("zone in sync, no write needed", "challengeRecords", diff.Kept, "serial", before)
 			return nil
 		}
+		if len(payload) == 0 {
+			// mijn.host rejects a PUT without records and has no call to
+			// delete a single record, so the last challenge record of a
+			// parked domain can only go by putting something else in its
+			// place. The placeholder is an ordinary record from then on.
+			placeholder := Placeholder(zone, r.opts.Now())
+			log.Info("zone would be empty, writing a placeholder record instead", "placeholder", Describe([]mijnhost.DNSRecord{placeholder}))
+			payload = append(payload, placeholder)
+		}
 
 		if checkable {
 			// The atomic check: if the zone changed since we read it, our
