@@ -3,8 +3,8 @@
 // The API only offers full-zone operations: GET returns every record in a
 // zone and PUT replaces every record in a zone. The API is also not
 // read-your-writes consistent: a GET shortly after a PUT can return the zone
-// as it was before the PUT. This package deliberately exposes nothing but
-// those two calls. Deciding what a PUT must contain, and making sure only one
+// as it was before the PUT. Besides the account's domain list, this package
+// deliberately exposes nothing but those two calls. Deciding what a PUT must contain, and making sure only one
 // caller writes a zone at a time, is the job of the zone package.
 package mijnhost
 
@@ -118,6 +118,31 @@ func (c *Client) PutRecords(ctx context.Context, zone string, records []DNSRecor
 	log.Info("mijn.host PUT", "zone", zone, "records", len(records),
 		"challengeRecords", countChallengeRecords(records), "duration", time.Since(start).Round(time.Millisecond))
 	return nil
+}
+
+// ListDomains returns the names of every domain on the account, whatever
+// its status (a cancelled domain keeps its zone until the renewal date).
+func (c *Client) ListDomains(ctx context.Context) ([]string, error) {
+	var resp struct {
+		apiStatus
+		Data struct {
+			Domains []struct {
+				Domain string `json:"domain"`
+			} `json:"domains"`
+		} `json:"data"`
+	}
+	err := c.do(ctx, http.MethodGet, "domains", nil, &resp)
+	if err == nil {
+		err = resp.err()
+	}
+	if err != nil {
+		return nil, fmt.Errorf("list domains: %w", err)
+	}
+	out := make([]string, 0, len(resp.Data.Domains))
+	for _, d := range resp.Data.Domains {
+		out = append(out, d.Domain)
+	}
+	return out, nil
 }
 
 func countChallengeRecords(records []DNSRecord) int {

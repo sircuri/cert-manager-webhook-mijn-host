@@ -227,3 +227,29 @@ func TestDNSSerialReader_Live(t *testing.T) {
 		t.Fatal("serial is zero")
 	}
 }
+
+func TestDNSSerialReader_EveryQueryBypassesAnswerCaches(t *testing.T) {
+	r, _ := newFakeSerialReader(map[string]uint32{"ns1": 100, "ns2": 100}, nil)
+	inner := r.exchange
+	seen := map[string]bool{}
+	r.exchange = func(ctx context.Context, m *dns.Msg, addr string) (*dns.Msg, error) {
+		opt := m.IsEdns0()
+		if opt == nil || len(opt.Option) != 1 {
+			t.Fatalf("query without the cache-busting EDNS option: %v", m)
+		}
+		key := opt.Option[0].String()
+		if seen[key] {
+			t.Fatalf("EDNS option %s sent twice", key)
+		}
+		seen[key] = true
+		return inner(ctx, m, addr)
+	}
+	for range 2 {
+		if _, err := r.Serial(context.Background(), "example.nl"); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if len(seen) != 4 {
+		t.Fatalf("%d distinct queries, want 4", len(seen))
+	}
+}

@@ -192,7 +192,7 @@ func (r *Reconciler) reconcile(ctx context.Context, op, zone string, secretRef *
 			return fmt.Errorf("zone %s: %w", zone, ErrSerialUnavailable)
 		}
 
-		current, err := r.getRecords(ctx, api, zone)
+		current, err := ReadZone(ctx, api, zone)
 		if err != nil {
 			return err
 		}
@@ -275,12 +275,13 @@ func desiredRecords(st State) []mijnhost.DNSRecord {
 	return out
 }
 
-// getRecords reads the zone. A domain can legitimately have no records of
+// ReadZone reads the zone. A domain can legitimately have no records of
 // its own (a parked domain: mijn.host serves SOA and NS itself and does not
 // list them), but an empty answer can also be a glitch, and a PUT built from
 // a glitched read would wipe the zone. So an empty read is read once more
-// and only trusted when the second read agrees.
-func (r *Reconciler) getRecords(ctx context.Context, api DNSAPI, zone string) ([]mijnhost.DNSRecord, error) {
+// and only trusted when the second read agrees. Every caller that builds a
+// PUT from a read must read through this function.
+func ReadZone(ctx context.Context, api DNSAPI, zone string) ([]mijnhost.DNSRecord, error) {
 	current, err := api.GetRecords(ctx, zone)
 	if err != nil || hasOwnRecords(current) {
 		return current, err
