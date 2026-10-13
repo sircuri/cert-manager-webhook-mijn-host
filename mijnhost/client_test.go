@@ -143,3 +143,47 @@ func TestNonJSONResponseIsAnError(t *testing.T) {
 		t.Fatal("expected error for non-JSON response")
 	}
 }
+
+func TestListDomains_ReturnsDomainNames(t *testing.T) {
+	var gotMethod, gotPath, gotKey string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotMethod, gotPath, gotKey = r.Method, r.URL.Path, r.Header.Get("api-key")
+		w.Header().Set("content-type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"status":             200,
+			"status_description": "Request successful",
+			"data": map[string]any{
+				"domains": []map[string]any{
+					{"id": 1, "domain": "example.nl", "status": "Active"},
+					{"id": 2, "domain": "example.com", "status": "Cancelled"},
+				},
+			},
+		})
+	}))
+	defer srv.Close()
+	c := NewClientWithBaseURL("test-api-key", srv.URL+"/api/v2/", srv.Client())
+
+	domains, err := c.ListDomains(context.Background())
+	if err != nil {
+		t.Fatalf("ListDomains: %v", err)
+	}
+	if gotMethod != http.MethodGet || gotPath != "/api/v2/domains" {
+		t.Errorf("request = %s %s, want GET /api/v2/domains", gotMethod, gotPath)
+	}
+	if gotKey != "test-api-key" {
+		t.Errorf("api-key header = %q", gotKey)
+	}
+	if len(domains) != 2 || domains[0] != "example.nl" || domains[1] != "example.com" {
+		t.Errorf("domains = %v", domains)
+	}
+}
+
+func TestListDomains_APIErrorIsReturned(t *testing.T) {
+	m := newMockServer(nil)
+	defer m.close()
+	m.failStatus = 401
+
+	if _, err := newTestClient(m).ListDomains(context.Background()); err == nil {
+		t.Fatal("expected an error for API status 401")
+	}
+}

@@ -252,6 +252,16 @@ after an hour; the webhook logs do not.
 
 ## Development
 
+### Public API
+
+The `mijnhost-dns` tool (repo `agent-toolset`) imports these packages to write zones the same way the webhook does. Keep these exports stable:
+
+- `mijnhost.NewClient`, `Client.ListDomains`, `Client.GetRecords`, `Client.PutRecords`, `mijnhost.DNSRecord`
+- `zone.ReadZone`: the read with the second look at an empty zone
+- `zone.NewLeaseLock`, `zone.LeaseLockOptions`: the per-zone write lock shared with the webhook
+- `zone.NewDNSSerialReader`: the SOA serial check
+- `zone.Placeholder`: the record written instead of an empty zone
+
 ### Running unit tests
 
 ```bash

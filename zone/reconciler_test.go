@@ -390,3 +390,31 @@ func TestReconcile_EmptyReadGlitchUsesSecondRead(t *testing.T) {
 		t.Fatal("challenge record not written")
 	}
 }
+
+func TestReadZone_RereadsAnEmptyZone(t *testing.T) {
+	dns := newFakeDNS(testZone)
+	dns.makeStale(1)
+	_ = dns.PutRecords(context.Background(), testZone, []mijnhost.DNSRecord{recA})
+
+	got, err := ReadZone(context.Background(), dns, testZone)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 1 || got[0] != recA {
+		t.Fatalf("ReadZone = %v, want the second read [%v]", got, recA)
+	}
+	if dns.gets != 2 {
+		t.Fatalf("gets = %d, want 2", dns.gets)
+	}
+}
+
+func TestReadZone_TrustsAZoneWithRecords(t *testing.T) {
+	dns := newFakeDNS(testZone, recA)
+
+	if _, err := ReadZone(context.Background(), dns, testZone); err != nil {
+		t.Fatal(err)
+	}
+	if dns.gets != 1 {
+		t.Fatalf("gets = %d, want 1", dns.gets)
+	}
+}
