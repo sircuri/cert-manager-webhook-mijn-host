@@ -2,6 +2,7 @@ package zone
 
 import (
 	"context"
+	"crypto/rand"
 	"errors"
 	"fmt"
 	"net"
@@ -76,14 +77,12 @@ func (r *DNSSerialReader) Serial(ctx context.Context, zone string) (uint32, erro
 		return 0, fmt.Errorf("%w: lookup NS for %s: %v", ErrSerialUnavailable, zone, err)
 	}
 
-	msg := new(dns.Msg)
-	msg.SetQuestion(dns.Fqdn(zone), dns.TypeSOA)
 	var best uint32
 	answered := 0
 	var lastErr error
 	for _, ns := range servers {
 		qctx, cancel := context.WithTimeout(ctx, r.timeout)
-		resp, err := r.exchange(qctx, msg, net.JoinHostPort(ns, "53"))
+		resp, err := r.exchange(qctx, soaQuery(zone), net.JoinHostPort(ns, "53"))
 		cancel()
 		if err != nil {
 			lastErr = err
@@ -105,6 +104,22 @@ func (r *DNSSerialReader) Serial(ctx context.Context, zone string) (uint32, erro
 		return 0, ErrSerialUnavailable
 	}
 	return best, nil
+}
+
+// soaQuery builds a SOA query that no nameserver cache can answer. The
+// mijn.host nameservers cache whole answers per query packet for about five
+// minutes, so two plain queries seconds apart return the same serial even
+// when the zone changed in between, and the serial check would never fire.
+// A random option in an experimental EDNS option code makes every packet
+// unique; nameservers ignore option codes they do not know (RFC 6891).
+func soaQuery(zone string) *dns.Msg {
+	msg := new(dns.Msg)
+	msg.SetQuestion(dns.Fqdn(zone), dns.TypeSOA)
+	msg.SetEdns0(1232, false)
+	data := make([]byte, 8)
+	_, _ = rand.Read(data)
+	msg.IsEdns0().Option = append(msg.IsEdns0().Option, &dns.EDNS0_LOCAL{Code: 65001, Data: data})
+	return msg
 }
 
 func (r *DNSSerialReader) nameservers(ctx context.Context, zone string) ([]string, error) {
