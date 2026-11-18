@@ -77,12 +77,38 @@ func NewReconciler(lock Locker, store Store, newAPI func(apiKey string) DNSAPI, 
 	return &Reconciler{lock: lock, store: store, newAPI: newAPI, apiKey: apiKey, opts: opts}
 }
 
+// CacheWaitError is returned by Present when the record is written but a
+// previous challenge record with the same name was removed so recently that
+// resolvers, Let's Encrypt's among them, may still answer with the old value.
+//
+// This happens for a certificate that covers both a name and its wildcard
+// (dashboard.example.nl and *.dashboard.example.nl): both challenges use the
+// same record name, and cert-manager handles them one after the other. If
+// Let's Encrypt checked the second one while it still remembered the first
+// answer, it would see the old value and fail the order. Returning an error
+// keeps cert-manager from asking Let's Encrypt yet; it calls Present again
+// later, which finds the record in place and succeeds once the wait is over.
+type CacheWaitError struct {
+	Name      string
+	Previous  string
+	Remaining time.Duration
+}
+
+func (e *CacheWaitError) Error() string {
+	return fmt.Sprintf("record %s is written, but the previous challenge value %s for the same name was removed less than its TTL ago "+
+		"and may still be cached by resolvers; waiting %s before Let's Encrypt may check, cert-manager retries automatically",
+		strings.TrimSuffix(e.Name, "."), e.Previous, e.Remaining.Round(time.Second))
+}
+
 // Present makes sure the record is listed as desired and present in the zone.
 // A repeated Present for the same record re-checks the zone, so a record that
-// an earlier stale write lost is written again.
+// an earlier stale write lost is written again. The record is always written
+// first; a *CacheWaitError afterwards only delays the validation.
 func (r *Reconciler) Present(ctx context.Context, req Request) error {
 	name := AbsoluteName(req.Name, req.Zone)
-	return r.reconcile(ctx, "present", req.Zone, &req.APIKeySecretRef, func(st *State) []Key {
+	var wait *CacheWaitError
+	err := r.reconcile(ctx, "present", req.Zone, &req.APIKeySecretRef, func(st *State) []Key {
+		wait = r.cacheWait(st, name, req.Value)
 		for i := range st.Records {
 			if st.Records[i].Name == name && st.Records[i].Value == req.Value {
 				st.Records[i].TTL = req.TTL
@@ -99,6 +125,32 @@ func (r *Reconciler) Present(ctx context.Context, req Request) error {
 		})
 		return nil
 	})
+	if err != nil {
+		return err
+	}
+	if wait != nil {
+		logr.FromContextOrDiscard(ctx).Info("record in place, waiting for the cached previous value to expire before validation",
+			"previous", wait.Previous, "remaining", wait.Remaining.Round(time.Second))
+		return wait
+	}
+	return nil
+}
+
+// cacheWait reports the longest wait for a removed record with the same
+// name but another value that resolvers may still have cached.
+func (r *Reconciler) cacheWait(st *State, name, value string) *CacheWaitError {
+	now := r.opts.Now()
+	var wait *CacheWaitError
+	for _, rm := range st.Removed {
+		if rm.Name != name || rm.Value == value {
+			continue
+		}
+		remaining := rm.cachedUntil().Sub(now)
+		if remaining > 0 && (wait == nil || remaining > wait.Remaining) {
+			wait = &CacheWaitError{Name: name, Previous: rm.Value, Remaining: remaining}
+		}
+	}
+	return wait
 }
 
 // CleanUp removes the record from the desired list and from the zone.
@@ -109,6 +161,7 @@ func (r *Reconciler) CleanUp(ctx context.Context, req Request) error {
 		kept := st.Records[:0]
 		for _, rec := range st.Records {
 			if rec.Name == name && rec.Value == req.Value {
+				st.Removed = append(st.Removed, Removal{Name: name, Value: rec.Value, TTL: rec.TTL, RemovedAt: r.opts.Now()})
 				continue
 			}
 			kept = append(kept, rec)
@@ -170,6 +223,7 @@ func (r *Reconciler) reconcile(ctx context.Context, op, zone string, secretRef *
 
 	before := len(h.State.Records)
 	expired := r.dropExpired(&h.State)
+	r.dropForgottenRemovals(&h.State)
 	remove := mutate(&h.State)
 	log.Info("zone state", "records", len(h.State.Records), "before", before, "expired", len(expired), "apiKeySecret", h.State.APIKeySecretRef.String())
 	if len(expired) > 0 {
@@ -265,6 +319,19 @@ func (r *Reconciler) dropExpired(st *State) []mijnhost.DNSRecord {
 	}
 	st.Records = kept
 	return expired
+}
+
+// dropForgottenRemovals forgets removed records no resolver can still have
+// cached.
+func (r *Reconciler) dropForgottenRemovals(st *State) {
+	now := r.opts.Now()
+	kept := st.Removed[:0]
+	for _, rm := range st.Removed {
+		if now.Before(rm.cachedUntil()) {
+			kept = append(kept, rm)
+		}
+	}
+	st.Removed = kept
 }
 
 func desiredRecords(st State) []mijnhost.DNSRecord {

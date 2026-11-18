@@ -164,8 +164,10 @@ func TestCleanUp_StaleReadStillShowingRecordDoesNotResurrectIt(t *testing.T) {
 	e.dns.snapshot[testZone] = []mijnhost.DNSRecord{recA, chalA}
 	e.dns.stale = 1
 
-	if err := e.rec.Present(context.Background(), request("_acme-challenge.example.nl", "bbb")); err != nil {
-		t.Fatal(err)
+	// Same name right after cleanup: written, then told to wait for caches.
+	var wait *CacheWaitError
+	if err := e.rec.Present(context.Background(), request("_acme-challenge.example.nl", "bbb")); !errors.As(err, &wait) {
+		t.Fatalf("present = %v, want CacheWaitError", err)
 	}
 	if got := e.dns.challenges(testZone); !equalStrings(got, Describe([]mijnhost.DNSRecord{chalB})) {
 		t.Fatalf("zone challenges = %v", got)
@@ -362,9 +364,11 @@ func TestReconcile_WritesToZoneWithoutOwnRecords(t *testing.T) {
 
 	// The placeholder is an ordinary record from then on: the next
 	// challenge needs no confirming read and keeps it.
+	// Same name right after cleanup, so it is written and then waits.
 	e.dns.gets = 0
-	if err := e.rec.Present(context.Background(), request("_acme-challenge.example.nl", "bbb")); err != nil {
-		t.Fatal(err)
+	var wait *CacheWaitError
+	if err := e.rec.Present(context.Background(), request("_acme-challenge.example.nl", "bbb")); !errors.As(err, &wait) {
+		t.Fatalf("present = %v, want CacheWaitError", err)
 	}
 	if !e.dns.has(testZone, placeholder) || !e.dns.has(testZone, chalB) {
 		t.Fatalf("zone after second present = %+v", e.dns.zones[testZone])
@@ -416,5 +420,89 @@ func TestReadZone_TrustsAZoneWithRecords(t *testing.T) {
 	}
 	if dns.gets != 1 {
 		t.Fatalf("gets = %d, want 1", dns.gets)
+	}
+}
+
+// A name and its wildcard share one record name and cert-manager presents
+// them one after the other. The second value must not be validated while
+// resolvers may still answer with the first.
+func TestPresent_WaitsForCachedPreviousValueOfSameName(t *testing.T) {
+	e := newTestEnv(t, recA)
+	ctx := context.Background()
+	first := request("_acme-challenge.example.nl", "aaa")
+	second := request("_acme-challenge.example.nl", "bbb")
+
+	if err := e.rec.Present(ctx, first); err != nil {
+		t.Fatal(err)
+	}
+	if err := e.rec.CleanUp(ctx, first); err != nil {
+		t.Fatal(err)
+	}
+
+	e.clock.advance(time.Second)
+	var wait *CacheWaitError
+	err := e.rec.Present(ctx, second)
+	if !errors.As(err, &wait) {
+		t.Fatalf("present = %v, want CacheWaitError", err)
+	}
+	if wait.Previous != "aaa" || wait.Remaining != 300*time.Second+cacheMargin-time.Second {
+		t.Fatalf("wait = %+v", wait)
+	}
+	if !e.dns.has(testZone, chalB) {
+		t.Fatalf("record not written before waiting: %v", e.dns.challenges(testZone))
+	}
+
+	// A retry within the window writes nothing and still waits.
+	puts := e.dns.puts
+	e.clock.advance(2 * time.Minute)
+	if err := e.rec.Present(ctx, second); !errors.As(err, &wait) {
+		t.Fatalf("retry = %v, want CacheWaitError", err)
+	}
+	if e.dns.puts != puts {
+		t.Fatalf("retry wrote the zone again")
+	}
+
+	// After the TTL plus margin the retry succeeds and the removal is forgotten.
+	e.clock.advance(4 * time.Minute)
+	if err := e.rec.Present(ctx, second); err != nil {
+		t.Fatalf("present after wait: %v", err)
+	}
+	h, _ := e.store.Load(ctx, testZone)
+	if len(h.State.Removed) != 0 {
+		t.Fatalf("removals not forgotten: %+v", h.State.Removed)
+	}
+}
+
+func TestPresent_NoWaitForOtherNameOrOldRemoval(t *testing.T) {
+	e := newTestEnv(t, recA)
+	ctx := context.Background()
+	first := request("_acme-challenge.example.nl", "aaa")
+	if err := e.rec.Present(ctx, first); err != nil {
+		t.Fatal(err)
+	}
+	if err := e.rec.CleanUp(ctx, first); err != nil {
+		t.Fatal(err)
+	}
+	if err := e.rec.Present(ctx, request("_acme-challenge.other.example.nl", "bbb")); err != nil {
+		t.Fatalf("other name waited: %v", err)
+	}
+	// The same value again (cert-manager retrying the same challenge) does not wait.
+	if err := e.rec.Present(ctx, first); err != nil {
+		t.Fatalf("same value waited: %v", err)
+	}
+	e.clock.advance(6 * time.Minute)
+	if err := e.rec.Present(ctx, request("_acme-challenge.example.nl", "ccc")); err != nil {
+		t.Fatalf("present after TTL waited: %v", err)
+	}
+}
+
+func TestCleanUp_UnknownRecordIsNotRemembered(t *testing.T) {
+	e := newTestEnv(t, recA)
+	ctx := context.Background()
+	if err := e.rec.CleanUp(ctx, request("_acme-challenge.example.nl", "never-added")); err != nil {
+		t.Fatal(err)
+	}
+	if err := e.rec.Present(ctx, request("_acme-challenge.example.nl", "bbb")); err != nil {
+		t.Fatalf("present waited for a record that was never ours: %v", err)
 	}
 }
