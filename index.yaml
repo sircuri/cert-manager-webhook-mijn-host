@@ -2,8 +2,18 @@ apiVersion: v1
 entries:
   mijn-host-webhook:
   - apiVersion: v2
+    appVersion: 0.6.5
+    created: "2026-11-21T08:11:49.821255749Z"
+    description: A Helm chart for the cert-manager webhook for mijn.host DNS solver
+    digest: 3cd8897b297e40f79f0da7dbb444eb8d9700306dc17f21dc3e17a1d4116af642
+    name: mijn-host-webhook
+    type: application
+    urls:
+    - https://sircuri.github.io/cert-manager-webhook-mijn-host/mijn-host-webhook-0.6.5.tgz
+    version: 0.6.5
+  - apiVersion: v2
     appVersion: 0.6.4
-    created: "2026-10-13T15:56:05.005250418Z"
+    created: "2026-11-21T08:11:49.82085971Z"
     description: A Helm chart for the cert-manager webhook for mijn.host DNS solver
     digest: b7b266b91313825d5ede4ca79e1b434f90ee113bb3cb482acce255d922297acf
     name: mijn-host-webhook
@@ -13,7 +23,7 @@ entries:
     version: 0.6.4
   - apiVersion: v2
     appVersion: 0.6.3
-    created: "2026-10-13T15:56:05.004840091Z"
+    created: "2026-11-21T08:11:49.820455687Z"
     description: A Helm chart for the cert-manager webhook for mijn.host DNS solver
     digest: 848d2adc8879631a0bcf4938d0bf29fb7b5b0359ef4d783983943ce2595eb9f6
     name: mijn-host-webhook
@@ -23,7 +33,7 @@ entries:
     version: 0.6.3
   - apiVersion: v2
     appVersion: 0.6.2
-    created: "2026-10-13T15:56:05.004436597Z"
+    created: "2026-11-21T08:11:49.820053066Z"
     description: A Helm chart for the cert-manager webhook for mijn.host DNS solver
     digest: f9d786e76fed11af6944d60566adddf31bdfe168a620663ee20ab84fe931b8ed
     name: mijn-host-webhook
@@ -33,7 +43,7 @@ entries:
     version: 0.6.2
   - apiVersion: v2
     appVersion: 0.6.1
-    created: "2026-10-13T15:56:05.004020459Z"
+    created: "2026-11-21T08:11:49.819642821Z"
     description: A Helm chart for the cert-manager webhook for mijn.host DNS solver
     digest: fdabe6d89c1d7d3601293923326ba7ac56aa2a350f48e1d26dd40819e4ccac0e
     name: mijn-host-webhook
@@ -43,7 +53,7 @@ entries:
     version: 0.6.1
   - apiVersion: v2
     appVersion: 0.6.0
-    created: "2026-10-13T15:56:05.003611825Z"
+    created: "2026-11-21T08:11:49.81924033Z"
     description: A Helm chart for the cert-manager webhook for mijn.host DNS solver
     digest: 10621220b839b8f13c09b0d0dc81befec72cbff03ea20de48085689b3ad1e572
     name: mijn-host-webhook
@@ -53,7 +63,7 @@ entries:
     version: 0.6.0
   - apiVersion: v2
     appVersion: 0.5.7
-    created: "2026-10-13T15:56:05.003178565Z"
+    created: "2026-11-21T08:11:49.818822771Z"
     description: A Helm chart for the cert-manager webhook for mijn.host DNS solver
     digest: 45fd5aada215a0ce5b7fb661ef44f0936b89df078756f207ae3e68f218ae934a
     name: mijn-host-webhook
@@ -63,7 +73,7 @@ entries:
     version: 0.5.7
   - apiVersion: v2
     appVersion: 0.5.6
-    created: "2026-10-13T15:56:05.002870268Z"
+    created: "2026-11-21T08:11:49.818482477Z"
     description: A Helm chart for the cert-manager webhook for mijn.host DNS solver
     digest: 07923f5328758f27406c9e6ad2ce2d2b6c5a1e7cf1adc600788da884662b4cca
     name: mijn-host-webhook
@@ -73,7 +83,7 @@ entries:
     version: 0.5.6
   - apiVersion: v2
     appVersion: 0.5.5
-    created: "2026-10-13T15:56:05.002642973Z"
+    created: "2026-11-21T08:11:49.818256064Z"
     description: A Helm chart for the cert-manager webhook for mijn.host DNS solver
     digest: 83ca4c5ddc6669af39ef7b82b84f3554dfcbb3d83fbfdc732b721fc3157f9ac0
     name: mijn-host-webhook
@@ -83,7 +93,7 @@ entries:
     version: 0.5.5
   - apiVersion: v2
     appVersion: 0.5.4
-    created: "2026-10-13T15:56:05.002340317Z"
+    created: "2026-11-21T08:11:49.818019222Z"
     description: A Helm chart for the cert-manager webhook for mijn.host DNS solver
     digest: fa96ec3d13fbfb78b4ea041d3687d1f181ea244fe8785bb6bd3b8b618759e435
     name: mijn-host-webhook
@@ -93,7 +103,7 @@ entries:
     version: 0.5.4
   - apiVersion: v2
     appVersion: 0.5.3
-    created: "2026-10-13T15:56:05.002112702Z"
+    created: "2026-11-21T08:11:49.817736014Z"
     description: A Helm chart for the cert-manager webhook for mijn.host DNS solver
     digest: 07cb30ddcb7f71daf1b5d8192945356871e87c9d95d5cd37a8d160e5aa4f8054
     name: mijn-host-webhook
@@ -103,7 +113,7 @@ entries:
     version: 0.5.3
   - apiVersion: v2
     appVersion: 0.5.2
-    created: "2026-10-13T15:56:05.001884285Z"
+    created: "2026-11-21T08:11:49.817498021Z"
     description: A Helm chart for the cert-manager webhook for mijn.host DNS solver
     digest: d8333692755289e5bdc32f0abb91a9bcbdfb1042abda9421a530ec6eb0b66648
     name: mijn-host-webhook
@@ -113,7 +123,7 @@ entries:
     version: 0.5.2
   - apiVersion: v2
     appVersion: 0.5.1
-    created: "2026-10-13T15:56:05.001646871Z"
+    created: "2026-11-21T08:11:49.817198492Z"
     description: A Helm chart for the cert-manager webhook for mijn.host DNS solver
     digest: 84515d016986167abdca3d1939bc3a7c4aadf6759bf72f2b54cfaf82cf4304c2
     name: mijn-host-webhook
@@ -123,7 +133,7 @@ entries:
     version: 0.5.1
   - apiVersion: v2
     appVersion: 0.5.0
-    created: "2026-10-13T15:56:05.001370023Z"
+    created: "2026-11-21T08:11:49.816968603Z"
     description: A Helm chart for the cert-manager webhook for mijn.host DNS solver
     digest: 87068275795867dc0b40d486cb49365c89c6898d24a07900041c77a82092eb8c
     name: mijn-host-webhook
@@ -133,7 +143,7 @@ entries:
     version: 0.5.0
   - apiVersion: v2
     appVersion: 0.4.0
-    created: "2026-10-13T15:56:05.001079009Z"
+    created: "2026-11-21T08:11:49.816696225Z"
     description: A Helm chart for the cert-manager webhook for mijn.host DNS solver
     digest: 70001329b619f7278d1785e5a88d7bb2f2d9a8ab8a855157c2d020e03c837e33
     name: mijn-host-webhook
@@ -143,7 +153,7 @@ entries:
     version: 0.4.0
   - apiVersion: v2
     appVersion: 0.3.0
-    created: "2026-10-13T15:56:05.000809475Z"
+    created: "2026-11-21T08:11:49.81644681Z"
     description: A Helm chart for the cert-manager webhook for mijn.host DNS solver
     digest: 6a23a4141f1dc71a05f048425ec65c38f3606f5db6a4c23081228a215d222644
     name: mijn-host-webhook
@@ -153,7 +163,7 @@ entries:
     version: 0.3.0
   - apiVersion: v2
     appVersion: 0.2.0
-    created: "2026-10-13T15:56:05.00053394Z"
+    created: "2026-11-21T08:11:49.816165385Z"
     description: A Helm chart for the cert-manager webhook for mijn.host DNS solver
     digest: 79adf4a90ae5d6babdc2efd45248b545a56b2bbd6502849c8abc84127c7d84c6
     name: mijn-host-webhook
@@ -163,7 +173,7 @@ entries:
     version: 0.2.0
   - apiVersion: v2
     appVersion: 0.1.0
-    created: "2026-10-13T15:56:05.000246693Z"
+    created: "2026-11-21T08:11:49.815865426Z"
     description: A Helm chart for the cert-manager webhook for mijn.host DNS solver
     digest: fe4c2bd98e8675ae693d42ec55a12a8658c5e8ebeeb2ffdf55ce85d5cb675933
     name: mijn-host-webhook
@@ -171,4 +181,4 @@ entries:
     urls:
     - https://sircuri.github.io/cert-manager-webhook-mijn-host/mijn-host-webhook-0.1.0.tgz
     version: 0.1.0
-generated: "2026-10-13T15:56:04.999819324Z"
+generated: "2026-11-21T08:11:49.815422499Z"
