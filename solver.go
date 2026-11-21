@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strings"
 	"time"
@@ -130,6 +131,11 @@ func (s *mijnHostSolver) handle(ch *v1alpha1.ChallengeRequest, action string, op
 	start := time.Now()
 	log.Info("challenge request received")
 	defer func() {
+		var wait *zone.CacheWaitError
+		if errors.As(err, &wait) {
+			log.Info("challenge request waiting, cert-manager retries", "reason", err.Error(), "duration", time.Since(start).Round(time.Millisecond))
+			return
+		}
 		if err != nil {
 			log.Error(err, "challenge request failed", "duration", time.Since(start).Round(time.Millisecond))
 			return

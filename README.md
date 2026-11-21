@@ -184,6 +184,16 @@ kubectl describe order -n default
 kubectl describe challenge -n default
 ```
 
+A certificate for both `example.com` and `*.example.com` takes up to about
+`ttl` seconds longer than one for a single name. Both challenges use the same
+record, `_acme-challenge.example.com`, and cert-manager handles them one after
+the other. Let's Encrypt remembers the first answer for `ttl` seconds, so if
+it checked the second challenge sooner it would see the old value and fail
+with `Incorrect TXT record ... found`. The webhook writes the second record
+right away, but answers cert-manager with "waiting" until the old value can
+no longer be cached. cert-manager retries by itself. The challenge shows the
+wait as its reason, and the webhook logs it as `challenge request waiting`.
+
 ### How writes are coordinated
 
 The mijn.host API replaces the whole zone on every write and can return a

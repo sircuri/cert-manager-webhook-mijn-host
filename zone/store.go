@@ -47,7 +47,29 @@ type State struct {
 	Zone            string    `json:"zone"`
 	APIKeySecretRef SecretRef `json:"apiKeySecretRef"`
 	Records         []Record  `json:"records"`
+	// Removed remembers challenge records that CleanUp took away while
+	// resolvers may still hold a cached copy of them. See CacheWaitError.
+	Removed []Removal `json:"removed,omitempty"`
 }
+
+// Removal is a challenge record that CleanUp removed, kept until its TTL has
+// run out.
+type Removal struct {
+	Name      string    `json:"name"` // absolute, with trailing dot
+	Value     string    `json:"value"`
+	TTL       int       `json:"ttl"`
+	RemovedAt time.Time `json:"removedAt"`
+}
+
+// cachedUntil is when every resolver that looked the record up before its
+// removal has forgotten it. CleanUp only runs after Let's Encrypt has
+// finished validating, so its lookup lies before RemovedAt. The margin
+// covers clock differences and resolvers that count the TTL a bit loosely.
+func (r Removal) cachedUntil() time.Time {
+	return r.RemovedAt.Add(time.Duration(r.TTL)*time.Second + cacheMargin)
+}
+
+const cacheMargin = 10 * time.Second
 
 // Handle is a loaded State plus what is needed to save it back with
 // optimistic concurrency.
